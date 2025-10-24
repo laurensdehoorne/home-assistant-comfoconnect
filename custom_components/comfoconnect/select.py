@@ -13,7 +13,6 @@ from aiocomfoconnect.const import (
     VentilationMode,
     VentilationSetting,
     VentilationTemperatureProfile,
-    VentilationSpeed,
 )
 from aiocomfoconnect.sensors import (
     SENSOR_BYPASS_ACTIVATION_STATE,
@@ -50,20 +49,22 @@ class ComfoconnectSelectEntityDescription(SelectEntityDescription, ComfoconnectS
 
 
 SELECT_TYPES = (
-    # Fan Mode (includes Away)
+    # Fan Mode (Away = 0)
     ComfoconnectSelectEntityDescription(
         key="fan_mode",
         name="Fan Mode",
         icon="mdi:fan",
         entity_category=EntityCategory.CONFIG,
         get_value_fn=lambda ccb: cast(Coroutine, ccb.get_mode()),
-        set_value_fn=lambda ccb, option: cast(Coroutine, ccb.set_mode(option)),
-        options=[VentilationMode.AUTO, VentilationMode.MANUAL, VentilationSpeed.AWAY],
+        set_value_fn=lambda ccb, option: cast(
+            Coroutine, ccb.set_mode(0 if option == "Away" else option)
+        ),
+        options=[VentilationMode.AUTO, VentilationMode.MANUAL, "Away"],
         sensor=SENSORS.get(SENSOR_OPERATING_MODE),
         sensor_value_fn=lambda value: {
             -1: VentilationMode.AUTO,
             1: VentilationMode.MANUAL,
-            0: VentilationSpeed.AWAY,
+            0: "Away",
         }.get(value, VentilationMode.AUTO),
     ),
     ComfoconnectSelectEntityDescription(
