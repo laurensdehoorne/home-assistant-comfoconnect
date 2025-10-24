@@ -75,6 +75,7 @@ MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=10)
 FAN_THROTTLE = timedelta(seconds=30)
 FLOW_THROTTLE = timedelta(seconds=60)
 POWER_THROTTLE = timedelta(seconds=60)
+TEMP_HUMIDITY_THROTTLE = timedelta(seconds=30)  # For exhaust sensors
 
 @dataclass
 class ComfoconnectRequiredKeysMixin:
@@ -88,7 +89,7 @@ class ComfoconnectSensorEntityDescription(SensorEntityDescription, ComfoconnectR
     mapping: Callable = None
 
 SENSOR_TYPES = (
-    # Temperatures and humidity (unthrottled)
+    # Temperatures and humidity (unthrottled except exhaust)
     ComfoconnectSensorEntityDescription(
         key=SENSOR_TEMPERATURE_EXTRACT,
         device_class=SensorDeviceClass.TEMPERATURE,
@@ -104,6 +105,28 @@ SENSOR_TYPES = (
         name="Inside humidity",
         native_unit_of_measurement=PERCENTAGE,
         ccb_sensor=SENSORS.get(SENSOR_HUMIDITY_EXTRACT),
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_TEMPERATURE_EXHAUST,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Exhaust temperature",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        ccb_sensor=SENSORS.get(SENSOR_TEMPERATURE_EXHAUST),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=TEMP_HUMIDITY_THROTTLE,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_HUMIDITY_EXHAUST,
+        device_class=SensorDeviceClass.HUMIDITY,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Exhaust humidity",
+        native_unit_of_measurement=PERCENTAGE,
+        ccb_sensor=SENSORS.get(SENSOR_HUMIDITY_EXHAUST),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=TEMP_HUMIDITY_THROTTLE,
     ),
     ComfoconnectSensorEntityDescription(
         key=SENSOR_RMOT,
@@ -147,6 +170,7 @@ SENSOR_TYPES = (
         native_unit_of_measurement=PERCENTAGE,
         ccb_sensor=SENSORS.get(SENSOR_HUMIDITY_SUPPLY),
     ),
+
     # Fan speeds and duty (throttled 30s)
     ComfoconnectSensorEntityDescription(
         key=SENSOR_FAN_SUPPLY_SPEED,
@@ -192,6 +216,7 @@ SENSOR_TYPES = (
         entity_category=EntityCategory.DIAGNOSTIC,
         throttle=FAN_THROTTLE,
     ),
+
     # Airflow sensors (throttled 60s)
     ComfoconnectSensorEntityDescription(
         key=SENSOR_FAN_SUPPLY_FLOW,
@@ -215,6 +240,7 @@ SENSOR_TYPES = (
         entity_category=EntityCategory.DIAGNOSTIC,
         throttle=FLOW_THROTTLE,
     ),
+
     # Other sensors (diagnostic, throttled 60s)
     ComfoconnectSensorEntityDescription(
         key=SENSOR_POWER_USAGE,
@@ -259,111 +285,6 @@ SENSOR_TYPES = (
         entity_registry_enabled_default=False,
         entity_category=EntityCategory.DIAGNOSTIC,
         throttle=POWER_THROTTLE,
-    ),
-    # Analog inputs (throttled 60s)
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_ANALOG_INPUT_1,
-        device_class=SensorDeviceClass.VOLTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="Analog Input 1",
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        ccb_sensor=SENSORS.get(SENSOR_ANALOG_INPUT_1),
-        entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=POWER_THROTTLE,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_ANALOG_INPUT_2,
-        device_class=SensorDeviceClass.VOLTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="Analog Input 2",
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        ccb_sensor=SENSORS.get(SENSOR_ANALOG_INPUT_2),
-        entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=POWER_THROTTLE,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_ANALOG_INPUT_3,
-        device_class=SensorDeviceClass.VOLTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="Analog Input 3",
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        ccb_sensor=SENSORS.get(SENSOR_ANALOG_INPUT_3),
-        entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=POWER_THROTTLE,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_ANALOG_INPUT_4,
-        device_class=SensorDeviceClass.VOLTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="Analog Input 4",
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        ccb_sensor=SENSORS.get(SENSOR_ANALOG_INPUT_4),
-        entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=POWER_THROTTLE,
-    ),
-    # Others unthrottled
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_AIRFLOW_CONSTRAINTS,
-        icon="mdi:fan-alert",
-        name="Airflow Constraint",
-        ccb_sensor=SENSORS.get(SENSOR_AIRFLOW_CONSTRAINTS),
-        entity_category=EntityCategory.DIAGNOSTIC,
-        mapping=lambda x: x[0] if x else "",
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_BYPASS_STATE,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="Bypass state",
-        native_unit_of_measurement=PERCENTAGE,
-        icon="mdi:camera-iris",
-        ccb_sensor=SENSORS.get(SENSOR_BYPASS_STATE),
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_DAYS_TO_REPLACE_FILTER,
-        name="Days to replace filter",
-        native_unit_of_measurement=UnitOfTime.DAYS,
-        icon="mdi:calendar",
-        ccb_sensor=SENSORS.get(SENSOR_DAYS_TO_REPLACE_FILTER),
-        entity_category=EntityCategory.DIAGNOSTIC,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_COMFOFOND_GHE_STATE,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="ComfoFond GHE state",
-        native_unit_of_measurement=PERCENTAGE,
-        ccb_sensor=SENSORS.get(SENSOR_COMFOFOND_GHE_STATE),
-        entity_registry_enabled_default=False,
-        entity_category=EntityCategory.DIAGNOSTIC,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_COMFOFOND_TEMP_GROUND,
-        device_class=SensorDeviceClass.TEMPERATURE,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="ComfoFond ground temperature",
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        ccb_sensor=SENSORS.get(SENSOR_COMFOFOND_TEMP_GROUND),
-        entity_registry_enabled_default=False,
-        entity_category=EntityCategory.DIAGNOSTIC,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_COMFOFOND_TEMP_OUTDOOR,
-        device_class=SensorDeviceClass.TEMPERATURE,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="ComfoFond outdoor air temperature",
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        ccb_sensor=SENSORS.get(SENSOR_COMFOFOND_TEMP_OUTDOOR),
-        entity_registry_enabled_default=False,
-        entity_category=EntityCategory.DIAGNOSTIC,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_COMFOCOOL_CONDENSOR_TEMP,
-        device_class=SensorDeviceClass.TEMPERATURE,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="ComfoCool condensor temperature",
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        ccb_sensor=SENSORS.get(SENSOR_COMFOCOOL_CONDENSOR_TEMP),
-        entity_registry_enabled_default=False,
-        entity_category=EntityCategory.DIAGNOSTIC,
     ),
 )
 
