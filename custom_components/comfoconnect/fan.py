@@ -72,11 +72,9 @@ class ComfoConnectFan(FanEntity):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._ccb.uuid)},
         )
-        self._last_non_away_percentage: int | None = None
 
     async def async_added_to_hass(self) -> None:
         """Register for sensor updates."""
-        _LOGGER.debug("Registering for fan speed")
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
@@ -88,7 +86,6 @@ class ComfoConnectFan(FanEntity):
         )
         await self._ccb.register_sensor(SENSORS.get(SENSOR_FAN_SPEED_MODE))
 
-        _LOGGER.debug("Registering for operating mode")
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
@@ -101,29 +98,18 @@ class ComfoConnectFan(FanEntity):
         await self._ccb.register_sensor(SENSORS.get(SENSOR_OPERATING_MODE))
 
     def _handle_speed_update(self, value: int) -> None:
-        """Handle update callbacks."""
-        _LOGGER.debug(
-            "Handle update for fan speed (%d): %s", SENSOR_FAN_SPEED_MODE, value
-        )
+        """Handle fan speed updates."""
         if value == 0:
             self._attr_percentage = 0
         else:
             self._attr_percentage = ordered_list_item_to_percentage(
                 FAN_SPEEDS, FAN_SPEED_MAPPING[value]
             )
-
         self.schedule_update_ha_state()
 
     def _handle_mode_update(self, value: int) -> None:
-        """Handle update callbacks."""
-        _LOGGER.debug(
-            "Handle update for operating mode (%d): %s",
-            SENSOR_OPERATING_MODE,
-            value,
-        )
-        self._attr_preset_mode = (
-            VentilationMode.AUTO if value == -1 else VentilationMode.MANUAL
-        )
+        """Handle ventilation mode updates."""
+        self._attr_preset_mode = VentilationMode.AUTO if value == -1 else VentilationMode.MANUAL
         self.schedule_update_ha_state()
 
     @property
@@ -143,56 +129,36 @@ class ComfoConnectFan(FanEntity):
             return
 
         if percentage is None:
-            await self.async_set_percentage(1)  # Set fan speed to low
+            await self.async_set_percentage(1)  # default low
         else:
             await self.async_set_percentage(percentage)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn off the fan (to away)."""
+        """Turn off the fan (set to Away)."""
         await self.async_set_preset_mode("away")
 
     async def async_set_percentage(self, percentage: int) -> None:
         """Set fan speed percentage."""
-        _LOGGER.debug("Changing fan speed percentage to %s", percentage)
-
         if percentage == 0:
             speed = VentilationSpeed.AWAY
         else:
             speed = percentage_to_ordered_list_item(FAN_SPEEDS, percentage)
 
         await self._ccb.set_speed(speed)
+        self._attr_percentage = percentage
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set new preset mode."""
         if preset_mode not in self.preset_modes:
             raise ValueError(f"Invalid preset mode: {preset_mode}")
 
-        _LOGGER.debug("Changing preset mode to %s", preset_mode)
-
-        # Handle the special "away" preset explicitly
         if preset_mode == "away":
-            if self.percentage and self.percentage > 0:
-                self._last_non_away_percentage = self.percentage
-                _LOGGER.debug(
-                    "Stored previous fan percentage before away: %s",
-                    self._last_non_away_percentage,
-                )
             await self.async_set_percentage(0)
             self._attr_preset_mode = "away"
-            self._attr_percentage = 0
-            self.schedule_update_ha_state()
-            return
+        else:
+            # Leaving Away or setting Auto/Manual always goes to Auto/Manual
+            if preset_mode in (VentilationMode.AUTO, VentilationMode.MANUAL):
+                await self._ccb.set_mode(preset_mode)
+                self._attr_preset_mode = preset_mode
 
-        # Restore last known speed when leaving away mode
-        if self._attr_preset_mode == "away" and self._last_non_away_percentage:
-            restore = self._last_non_away_percentage
-            _LOGGER.debug(
-                "Leaving Away mode, restoring previous fan speed: %s%%", restore
-            )
-            await self.async_set_percentage(restore)
-
-        # Set Auto or Manual modes normally
-        if preset_mode in (VentilationMode.AUTO, VentilationMode.MANUAL):
-            await self._ccb.set_mode(preset_mode)
-            self._attr_preset_mode = preset_mode
-            self.schedule_update_ha_state()
+        self.schedule_update_ha_state()
