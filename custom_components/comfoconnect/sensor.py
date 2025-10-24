@@ -40,9 +40,7 @@ from aiocomfoconnect.sensors import (
     SENSOR_TEMPERATURE_SUPPLY,
     SENSORS,
 )
-from aiocomfoconnect.sensors import (
-    Sensor as AioComfoConnectSensor,
-)
+from aiocomfoconnect.sensors import Sensor as AioComfoConnectSensor
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -70,25 +68,27 @@ from . import DOMAIN, SIGNAL_COMFOCONNECT_UPDATE_RECEIVED, ComfoConnectBridge
 
 _LOGGER = logging.getLogger(__name__)
 
+# Global default throttle
 MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=10)
 
+# Custom throttles for high-frequency sensors
+FAN_THROTTLE = timedelta(seconds=30)
+FLOW_THROTTLE = timedelta(seconds=60)
+POWER_THROTTLE = timedelta(seconds=60)
 
 @dataclass
 class ComfoconnectRequiredKeysMixin:
     """Mixin for required keys."""
-
     ccb_sensor: AioComfoConnectSensor
-
 
 @dataclass
 class ComfoconnectSensorEntityDescription(SensorEntityDescription, ComfoconnectRequiredKeysMixin):
     """Describes ComfoConnect sensor entity."""
-
-    throttle: bool = False
+    throttle: bool | timedelta = False
     mapping: Callable = None
 
-
 SENSOR_TYPES = (
+    # Temperatures and humidity (unthrottled)
     ComfoconnectSensorEntityDescription(
         key=SENSOR_TEMPERATURE_EXTRACT,
         device_class=SensorDeviceClass.TEMPERATURE,
@@ -147,6 +147,7 @@ SENSOR_TYPES = (
         native_unit_of_measurement=PERCENTAGE,
         ccb_sensor=SENSORS.get(SENSOR_HUMIDITY_SUPPLY),
     ),
+    # Fan speeds and duty (throttled 30s)
     ComfoconnectSensorEntityDescription(
         key=SENSOR_FAN_SUPPLY_SPEED,
         state_class=SensorStateClass.MEASUREMENT,
@@ -156,7 +157,7 @@ SENSOR_TYPES = (
         ccb_sensor=SENSORS.get(SENSOR_FAN_SUPPLY_SPEED),
         entity_registry_enabled_default=False,
         entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=True,
+        throttle=FAN_THROTTLE,
     ),
     ComfoconnectSensorEntityDescription(
         key=SENSOR_FAN_SUPPLY_DUTY,
@@ -167,7 +168,7 @@ SENSOR_TYPES = (
         ccb_sensor=SENSORS.get(SENSOR_FAN_SUPPLY_DUTY),
         entity_registry_enabled_default=False,
         entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=True,
+        throttle=FAN_THROTTLE,
     ),
     ComfoconnectSensorEntityDescription(
         key=SENSOR_FAN_EXHAUST_SPEED,
@@ -178,7 +179,7 @@ SENSOR_TYPES = (
         ccb_sensor=SENSORS.get(SENSOR_FAN_EXHAUST_SPEED),
         entity_registry_enabled_default=False,
         entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=True,
+        throttle=FAN_THROTTLE,
     ),
     ComfoconnectSensorEntityDescription(
         key=SENSOR_FAN_EXHAUST_DUTY,
@@ -189,24 +190,9 @@ SENSOR_TYPES = (
         ccb_sensor=SENSORS.get(SENSOR_FAN_EXHAUST_DUTY),
         entity_registry_enabled_default=False,
         entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=True,
+        throttle=FAN_THROTTLE,
     ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_TEMPERATURE_EXHAUST,
-        device_class=SensorDeviceClass.TEMPERATURE,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="Exhaust temperature",
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        ccb_sensor=SENSORS.get(SENSOR_TEMPERATURE_EXHAUST),
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_HUMIDITY_EXHAUST,
-        device_class=SensorDeviceClass.HUMIDITY,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="Exhaust humidity",
-        native_unit_of_measurement=PERCENTAGE,
-        ccb_sensor=SENSORS.get(SENSOR_HUMIDITY_EXHAUST),
-    ),
+    # Airflow sensors (throttled 60s)
     ComfoconnectSensorEntityDescription(
         key=SENSOR_FAN_SUPPLY_FLOW,
         state_class=SensorStateClass.MEASUREMENT,
@@ -216,7 +202,7 @@ SENSOR_TYPES = (
         ccb_sensor=SENSORS.get(SENSOR_FAN_SUPPLY_FLOW),
         entity_registry_enabled_default=False,
         entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=True,
+        throttle=FLOW_THROTTLE,
     ),
     ComfoconnectSensorEntityDescription(
         key=SENSOR_FAN_EXHAUST_FLOW,
@@ -227,7 +213,102 @@ SENSOR_TYPES = (
         ccb_sensor=SENSORS.get(SENSOR_FAN_EXHAUST_FLOW),
         entity_registry_enabled_default=False,
         entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=True,
+        throttle=FLOW_THROTTLE,
+    ),
+    # Other sensors (diagnostic, throttled 60s)
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_POWER_USAGE,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Ventilation current power usage",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        ccb_sensor=SENSORS.get(SENSOR_POWER_USAGE),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=POWER_THROTTLE,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_POWER_USAGE_TOTAL,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        name="Ventilation total energy usage",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        ccb_sensor=SENSORS.get(SENSOR_POWER_USAGE_TOTAL),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=POWER_THROTTLE,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_PREHEATER_POWER,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Preheater current power usage",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        ccb_sensor=SENSORS.get(SENSOR_PREHEATER_POWER),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=POWER_THROTTLE,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_PREHEATER_POWER_TOTAL,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        name="Preheater total energy usage",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        ccb_sensor=SENSORS.get(SENSOR_PREHEATER_POWER_TOTAL),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=POWER_THROTTLE,
+    ),
+    # Analog inputs (throttled 60s)
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_ANALOG_INPUT_1,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Analog Input 1",
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        ccb_sensor=SENSORS.get(SENSOR_ANALOG_INPUT_1),
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=POWER_THROTTLE,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_ANALOG_INPUT_2,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Analog Input 2",
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        ccb_sensor=SENSORS.get(SENSOR_ANALOG_INPUT_2),
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=POWER_THROTTLE,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_ANALOG_INPUT_3,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Analog Input 3",
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        ccb_sensor=SENSORS.get(SENSOR_ANALOG_INPUT_3),
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=POWER_THROTTLE,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_ANALOG_INPUT_4,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Analog Input 4",
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        ccb_sensor=SENSORS.get(SENSOR_ANALOG_INPUT_4),
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=POWER_THROTTLE,
+    ),
+    # Others unthrottled
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_AIRFLOW_CONSTRAINTS,
+        icon="mdi:fan-alert",
+        name="Airflow Constraint",
+        ccb_sensor=SENSORS.get(SENSOR_AIRFLOW_CONSTRAINTS),
+        entity_category=EntityCategory.DIAGNOSTIC,
+        mapping=lambda x: x[0] if x else "",
     ),
     ComfoconnectSensorEntityDescription(
         key=SENSOR_BYPASS_STATE,
@@ -244,98 +325,6 @@ SENSOR_TYPES = (
         icon="mdi:calendar",
         ccb_sensor=SENSORS.get(SENSOR_DAYS_TO_REPLACE_FILTER),
         entity_category=EntityCategory.DIAGNOSTIC,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_POWER_USAGE,
-        device_class=SensorDeviceClass.POWER,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="Ventilation current power usage",
-        native_unit_of_measurement=UnitOfPower.WATT,
-        ccb_sensor=SENSORS.get(SENSOR_POWER_USAGE),
-        entity_registry_enabled_default=False,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=True,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_POWER_USAGE_TOTAL,
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-        name="Ventilation total energy usage",
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        ccb_sensor=SENSORS.get(SENSOR_POWER_USAGE_TOTAL),
-        entity_registry_enabled_default=False,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=True,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_PREHEATER_POWER,
-        device_class=SensorDeviceClass.POWER,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="Preheater current power usage",
-        native_unit_of_measurement=UnitOfPower.WATT,
-        ccb_sensor=SENSORS.get(SENSOR_PREHEATER_POWER),
-        entity_registry_enabled_default=False,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=True,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_PREHEATER_POWER_TOTAL,
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-        name="Preheater total energy usage",
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        ccb_sensor=SENSORS.get(SENSOR_PREHEATER_POWER_TOTAL),
-        entity_registry_enabled_default=False,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=True,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_ANALOG_INPUT_1,
-        device_class=SensorDeviceClass.VOLTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="Analog Input 1",
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        ccb_sensor=SENSORS.get(SENSOR_ANALOG_INPUT_1),
-        entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=True,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_ANALOG_INPUT_2,
-        device_class=SensorDeviceClass.VOLTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="Analog Input 2",
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        ccb_sensor=SENSORS.get(SENSOR_ANALOG_INPUT_2),
-        entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=True,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_ANALOG_INPUT_3,
-        device_class=SensorDeviceClass.VOLTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="Analog Input 3",
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        ccb_sensor=SENSORS.get(SENSOR_ANALOG_INPUT_3),
-        entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=True,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_ANALOG_INPUT_4,
-        device_class=SensorDeviceClass.VOLTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        name="Analog Input 4",
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        ccb_sensor=SENSORS.get(SENSOR_ANALOG_INPUT_4),
-        entity_category=EntityCategory.DIAGNOSTIC,
-        throttle=True,
-    ),
-    ComfoconnectSensorEntityDescription(
-        key=SENSOR_AIRFLOW_CONSTRAINTS,
-        icon="mdi:fan-alert",
-        name="Airflow Constraint",
-        ccb_sensor=SENSORS.get(SENSOR_AIRFLOW_CONSTRAINTS),
-        entity_category=EntityCategory.DIAGNOSTIC,
-        mapping=lambda x: x[0] if x else "",
     ),
     ComfoconnectSensorEntityDescription(
         key=SENSOR_COMFOFOND_GHE_STATE,
@@ -378,7 +367,6 @@ SENSOR_TYPES = (
     ),
 )
 
-
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -386,11 +374,11 @@ async def async_setup_entry(
 ) -> None:
     """Set up the ComfoConnect sensors."""
     ccb = hass.data[DOMAIN][config_entry.entry_id]
-
-    sensors = [ComfoConnectSensor(ccb=ccb, config_entry=config_entry, description=description) for description in SENSOR_TYPES]
-
+    sensors = [
+        ComfoConnectSensor(ccb=ccb, config_entry=config_entry, description=description)
+        for description in SENSOR_TYPES
+    ]
     async_add_entities(sensors, True)
-
 
 class ComfoConnectSensor(SensorEntity):
     """Representation of a ComfoConnect sensor."""
@@ -421,8 +409,10 @@ class ComfoConnectSensor(SensorEntity):
             self.entity_description.key,
         )
 
-        # If the sensor should be throttled, pass it through the Throttle utility
-        if self.entity_description.throttle:
+        # Apply custom throttling
+        if isinstance(self.entity_description.throttle, timedelta):
+            update_handler = Throttle(self.entity_description.throttle)(self._handle_update)
+        elif self.entity_description.throttle:
             update_handler = Throttle(MIN_TIME_BETWEEN_UPDATES)(self._handle_update)
         else:
             update_handler = self._handle_update
@@ -430,7 +420,9 @@ class ComfoConnectSensor(SensorEntity):
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                SIGNAL_COMFOCONNECT_UPDATE_RECEIVED.format(self._ccb.uuid, self.entity_description.key),
+                SIGNAL_COMFOCONNECT_UPDATE_RECEIVED.format(
+                    self._ccb.uuid, self.entity_description.key
+                ),
                 update_handler,
             )
         )
@@ -444,7 +436,6 @@ class ComfoConnectSensor(SensorEntity):
             self.entity_description.key,
             value,
         )
-
         if self.entity_description.mapping:
             self._attr_native_value = self.entity_description.mapping(value)
         else:
