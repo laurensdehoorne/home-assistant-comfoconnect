@@ -28,7 +28,7 @@ class ComfoConnectConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     def __init__(self) -> None:
-        """Initialize the flow."""
+        """Initialize the Hue flow."""
         self.bridge: Bridge | None = None
         self.local_uuid: str | None = None
         self.discovered_bridges: dict[str, Bridge] | None = None
@@ -63,22 +63,9 @@ class ComfoConnectConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 return await self._register()
 
-        # Find bridges on the network
+        # Find bridges on the network and filter out the ones we already have configured
         bridges = await aiocomfoconnect.discover_bridges()
-
-        # 🔍 Filter out demo units and already-configured bridges
-        filtered_bridges = []
-        for bridge in bridges:
-            uuid_str = str(getattr(bridge, "uuid", "")).lower()
-            name_str = str(getattr(bridge, "name", "")).lower()
-            if uuid_str.startswith("00000000") or "demo" in name_str:
-                _LOGGER.debug("Ignoring demo bridge: %s (%s)", bridge.name, bridge.host)
-                continue
-            if bridge.uuid in self._async_current_ids(False):
-                continue
-            filtered_bridges.append(bridge)
-
-        self.discovered_bridges = {bridge.uuid: bridge for bridge in filtered_bridges}
+        self.discovered_bridges = {bridge.uuid: bridge for bridge in bridges if bridge.uuid not in self._async_current_ids(False)}
 
         # Show the bridge selection form
         return self.async_show_form(
@@ -98,16 +85,18 @@ class ComfoConnectConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_manual(self, user_input: ConfigType | None = None) -> FlowResult:
         """Handle manual bridge setup."""
         errors = {}
-        if user_input is not None and user_input.get(CONF_HOST) is not None:
-            # Discover bridge to get its UUID
+        if user_input is not None and user_input[CONF_HOST] is not None:
+            # We need to discover the bridge to get its UUID
             bridges = await aiocomfoconnect.discover_bridges(user_input[CONF_HOST])
             if len(bridges) == 0:
+                # Could not discover the bridge
                 errors = {"base": "invalid_host"}
             else:
                 self.bridge = bridges[0]
                 # Don't allow to configure the same bridge twice
                 await self.async_set_unique_id(self.bridge.uuid, raise_on_progress=False)
                 self._abort_if_unique_id_configured()
+
                 return await self._register()
 
         return self.async_show_form(
@@ -120,6 +109,7 @@ class ComfoConnectConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Register on the bridge."""
 
         if self.local_uuid is None:
+            # Generate our own UUID if non is provided
             self.local_uuid = random_uuid_hex()
 
         # Connect to the bridge
@@ -129,17 +119,19 @@ class ComfoConnectConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         except ComfoConnectNotAllowed:
             try:
-                # Try to register
+                # We probably are not registered yet, lets try to register.
                 await self.bridge.cmd_register_app(
                     self.local_uuid,
-                    f"Home Assistant ({self.hass.config.location_name})",
+                    "Home Assistant (%s)" % self.hass.config.location_name,
                     pin or DEFAULT_PIN,
                 )
+
             except ComfoConnectNotAllowed:
+                # We have tried connecting, but we have an invalid PIN. Ask the user for a new PIN.
                 errors = {"base": "invalid_pin"} if pin is not None else {}
                 return await self.async_step_enter_pin({}, errors)
 
-            # Registration successful, reconnect
+            # Registration went fine, connect to the bridge again
             await self.bridge.cmd_start_session(True)
 
         finally:
