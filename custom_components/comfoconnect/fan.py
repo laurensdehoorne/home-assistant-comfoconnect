@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from typing import Any
 
 from aiocomfoconnect.const import VentilationMode, VentilationSpeed
@@ -137,16 +138,18 @@ class ComfoConnectFan(FanEntity):
         preset_mode: str | None = None,
         **kwargs: Any,
     ) -> None:
-        """Turn on the fan."""
-        # Als ventilator uit stond en geen preset_mode meegegeven, zet AUTO
+        """Turn on the fan, ensuring AUTO mode is set first."""
+        # Als ventilator uit staat en geen preset_mode is opgegeven, zet AUTO
         if not self.is_on and not preset_mode:
             preset_mode = VentilationMode.AUTO
 
-        # Stel preset_mode in als er een is
+        # Zet preset mode eerst
         if preset_mode:
             await self.async_set_preset_mode(preset_mode)
+            # Korte vertraging zodat de bridge de mode registreert
+            await asyncio.sleep(0.5)
 
-        # Stel percentage in (default laag als niet opgegeven)
+        # Stel snelheid in (standaard laag als niet opgegeven)
         if percentage is None:
             percentage = ordered_list_item_to_percentage(FAN_SPEEDS, VentilationSpeed.LOW)
 
