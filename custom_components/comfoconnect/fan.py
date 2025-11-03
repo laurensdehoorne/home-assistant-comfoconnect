@@ -1,4 +1,4 @@
-"""Fan for the ComfoConnect integration."""
+"""Fan for the ComfoConnect integration with Manual → Auto fix."""
 
 from __future__ import annotations
 
@@ -85,9 +85,6 @@ class ComfoConnectFan(FanEntity):
 
     async def async_added_to_hass(self) -> None:
         """Register for sensor updates."""
-        if _LOGGER.isEnabledFor(logging.DEBUG):
-            _LOGGER.debug("Registering for fan speed and operating mode updates")
-
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
@@ -108,9 +105,6 @@ class ComfoConnectFan(FanEntity):
 
     def _handle_speed_update(self, value: int) -> None:
         """Handle update callbacks."""
-        if _LOGGER.isEnabledFor(logging.DEBUG):
-            _LOGGER.debug("Received fan speed update (%d): %s", SENSOR_FAN_SPEED_MODE, value)
-
         speed = FAN_SPEED_MAPPING.get(value, VentilationSpeed.LOW)
         if speed == VentilationSpeed.AWAY:
             self._attr_percentage = 0
@@ -121,9 +115,6 @@ class ComfoConnectFan(FanEntity):
 
     def _handle_mode_update(self, value: int) -> None:
         """Handle update callbacks."""
-        if _LOGGER.isEnabledFor(logging.DEBUG):
-            _LOGGER.debug("Received operating mode update (%d): %s", SENSOR_OPERATING_MODE, value)
-
         self._attr_preset_mode = MODE_MAPPING.get(value, VentilationMode.MANUAL)
         self.schedule_update_ha_state()
 
@@ -138,22 +129,23 @@ class ComfoConnectFan(FanEntity):
         preset_mode: str | None = None,
         **kwargs: Any,
     ) -> None:
-        """Turn on the fan, ensuring AUTO mode is set first."""
-        # Als ventilator uit staat en geen preset_mode is opgegeven, zet AUTO
-        if not self.is_on and not preset_mode:
-            preset_mode = VentilationMode.AUTO
+        """Turn on the fan, ensuring it correctly goes to AUTO mode."""
+        if not self.is_on:
+            # Zet fan aan (standaard laag)
+            if percentage is None:
+                percentage = ordered_list_item_to_percentage(FAN_SPEEDS, VentilationSpeed.LOW)
+            await self.async_set_percentage(percentage)
 
-        # Zet preset mode eerst
-        if preset_mode:
-            await self.async_set_preset_mode(preset_mode)
-            # Korte vertraging zodat de bridge de mode registreert
+            # Forceer twee mode switches: Manual → Auto
+            await self.async_set_preset_mode(VentilationMode.MANUAL)
             await asyncio.sleep(0.5)
-
-        # Stel snelheid in (standaard laag als niet opgegeven)
-        if percentage is None:
-            percentage = ordered_list_item_to_percentage(FAN_SPEEDS, VentilationSpeed.LOW)
-
-        await self.async_set_percentage(percentage)
+            await self.async_set_preset_mode(VentilationMode.AUTO)
+        else:
+            # Fan is al aan, gewoon mode instellen als opgegeven
+            if preset_mode:
+                await self.async_set_preset_mode(preset_mode)
+            if percentage is not None:
+                await self.async_set_percentage(percentage)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the fan (set to away)."""
@@ -161,10 +153,7 @@ class ComfoConnectFan(FanEntity):
 
     async def async_set_percentage(self, percentage: int) -> None:
         """Set fan speed percentage."""
-        percentage = max(0, min(percentage, 100))  # clamp between 0–100
-
-        if _LOGGER.isEnabledFor(logging.DEBUG):
-            _LOGGER.debug("Setting fan speed percentage to %s", percentage)
+        percentage = max(0, min(percentage, 100))
 
         if percentage == 0:
             speed = VentilationSpeed.AWAY
@@ -180,9 +169,6 @@ class ComfoConnectFan(FanEntity):
         if preset_mode not in self.preset_modes:
             _LOGGER.warning("Invalid preset mode: %s", preset_mode)
             return
-
-        if _LOGGER.isEnabledFor(logging.DEBUG):
-            _LOGGER.debug("Setting preset mode to %s", preset_mode)
 
         await self._ccb.set_mode(preset_mode)
         self._attr_preset_mode = preset_mode
