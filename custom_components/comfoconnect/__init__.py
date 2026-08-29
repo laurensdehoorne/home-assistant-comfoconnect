@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 
 from aiocomfoconnect import ComfoConnect, discover_bridges
+from aiocomfoconnect.bridge import EventBus
 from aiocomfoconnect.exceptions import (
     AioComfoConnectNotConnected,
     AioComfoConnectTimeout,
@@ -48,6 +50,10 @@ SIGNAL_COMFOCONNECT_UPDATE_RECEIVED = "comfoconnect_update_{}_{}"
 SIGNAL_COMFOCONNECT_AVAILABLE = "comfoconnect_available_{}"
 
 KEEP_ALIVE_INTERVAL = timedelta(seconds=30)
+
+# Maximum time we wait for a watchdog-initiated reconnect to complete. The
+# reconnect loop keeps running in the background when this expires.
+RECONNECT_TIMEOUT = 30
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -146,14 +152,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    reconnect_lock = asyncio.Lock()
+
+    async def restart_connection_if_dead() -> None:
+        """Restart the connection when the library's reconnect loop is gone.
+
+        The reconnect loop normally recovers from a dropped connection by
+        itself, but it stops for good if it ever ends with an unexpected
+        exception. Without this watchdog the integration would then stay
+        offline until Home Assistant is restarted.
+        """
+        if bridge.reconnect_loop_alive() or reconnect_lock.locked():
+            return
+
+        async with reconnect_lock:
+            _LOGGER.warning("The reconnect loop is no longer running, reconnecting to bridge %s.", bridge.host)
+            await bridge.disconnect()
+            try:
+                async with asyncio.timeout(RECONNECT_TIMEOUT):
+                    await bridge.connect(entry.data[CONF_LOCAL_UUID])
+            except (TimeoutError, AioComfoConnectTimeout, ComfoConnectError, OSError) as err:
+                # The reconnect loop retries on its own from here on.
+                _LOGGER.debug("Reconnecting to the bridge did not succeed (yet): %s", err)
+
     async def send_keepalive(now) -> None:
         """Probe the bridge and report availability.
 
         ComfoConnect.connect() runs its own internal reconnect loop, so we must
-        not call connect() again here: doing so spawns duplicate reconnect loops
-        and read tasks, which get orphaned ("Task was destroyed but it is
-        pending!"). We only probe the bridge and update entity availability; the
-        library restores the connection on its own.
+        not call connect() again here while that loop is alive: doing so spawns
+        duplicate reconnect loops and read tasks, which get orphaned ("Task was
+        destroyed but it is pending!"). We only probe the bridge and update
+        entity availability; the library restores the connection on its own,
+        unless its reconnect loop died (see restart_connection_if_dead).
         """
         _LOGGER.debug("Sending keepalive...")
         try:
@@ -162,6 +192,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except (AioComfoConnectNotConnected, AioComfoConnectTimeout):
             _LOGGER.debug("Keepalive failed; bridge unavailable (library will reconnect).")
             dispatcher_send(hass, SIGNAL_COMFOCONNECT_AVAILABLE.format(bridge.uuid), False)
+            await restart_connection_if_dead()
         else:
             dispatcher_send(hass, SIGNAL_COMFOCONNECT_AVAILABLE.format(bridge.uuid), True)
 
@@ -187,6 +218,26 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 
+class SafeEventBus(EventBus):
+    """An event bus that tolerates replies we are no longer waiting for.
+
+    The library deletes the listeners of a reference right after emitting, so a
+    late or duplicate reply for a reference that has no listeners left raises a
+    KeyError. That exception escapes the read loop and kills the reconnect loop,
+    leaving the integration offline until Home Assistant is restarted.
+    """
+
+    def emit(self, event_name, event):
+        """Emit an event to the event bus."""
+        for future in self.listeners.pop(event_name, ()):
+            if future.done():
+                continue
+            if isinstance(event, Exception):
+                future.set_exception(event)
+            else:
+                future.set_result(event)
+
+
 class ComfoConnectBridge(ComfoConnect):
     """Representation of a ComfoConnect bridge."""
 
@@ -199,6 +250,73 @@ class ComfoConnectBridge(ComfoConnect):
             alarm_callback=self.alarm_callback,
         )
         self.hass = hass
+        self._watched_tasks = set()
+
+    async def connect(self, uuid: str) -> None:
+        """Connect to the bridge and keep an eye on its reconnect loop."""
+        await super().connect(uuid)
+
+        # Retrieve the result of the reconnect loop when it ends, so a crash is
+        # logged by us instead of surfacing as "Task exception was never
+        # retrieved".
+        for task in self._tasks:
+            if task not in self._watched_tasks:
+                self._watched_tasks.add(task)
+                task.add_done_callback(self._reconnect_task_done)
+
+    def reconnect_loop_alive(self) -> bool:
+        """Return True while the library's reconnect loop is still running."""
+        return any(not task.done() for task in self._tasks)
+
+    @callback
+    def _reconnect_task_done(self, task) -> None:
+        """Report why the reconnect loop stopped."""
+        self._watched_tasks.discard(task)
+        if task.cancelled():
+            return
+        if err := task.exception():
+            _LOGGER.warning("The connection to the bridge stopped unexpectedly: %s", err)
+
+    async def _connect(self, uuid: str):
+        """Connect to the bridge, using an event bus that survives stray replies."""
+        read_task = await super()._connect(uuid)
+
+        # The event bus is created (empty) by the connect above; replace it
+        # before the read task gets a chance to process a message.
+        self._event_bus = SafeEventBus()
+
+        return read_task
+
+    async def _disconnect(self):
+        """Disconnect from the bridge, ignoring an already broken connection."""
+        try:
+            await super()._disconnect()
+        except OSError as err:
+            # E.g. ConnectionResetError while flushing the socket on shutdown.
+            _LOGGER.debug("Error while closing the connection to the bridge: %s", err)
+
+    async def _process_message(self):
+        """Process a message from the bridge without killing the read loop.
+
+        The library only translates an incomplete read into a disconnect. Any
+        other error escapes the read loop and terminates the reconnect loop with
+        it, so we handle those here: signal a disconnect when the connection is
+        gone (the reconnect loop then reconnects), and otherwise keep reading.
+        """
+        try:
+            await super()._process_message()
+        except AioComfoConnectNotConnected:
+            raise
+        except OSError as err:
+            # E.g. ConnectionResetError: the bridge dropped the connection.
+            _LOGGER.info("The connection to the bridge was lost: %s", err)
+            await self._disconnect()
+            raise AioComfoConnectNotConnected("The connection was closed.") from err
+        except Exception as err:
+            _LOGGER.exception("Unexpected error while processing a message from the bridge")
+            if self.is_connected():
+                return
+            raise AioComfoConnectNotConnected("The connection was closed.") from err
 
     @callback
     def sensor_callback(self, sensor: Sensor, value):
