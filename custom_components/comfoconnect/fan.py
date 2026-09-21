@@ -45,7 +45,7 @@ FAN_SPEED_MAPPING = {
 
 MODE_MAPPING = {
     -1: VentilationMode.AUTO,
-     1: VentilationMode.MANUAL,
+    1: VentilationMode.MANUAL,
 }
 
 
@@ -65,12 +65,7 @@ class ComfoConnectFan(FanEntity):
     _attr_enable_turn_on_off_backwards_compatibility = False
     _attr_icon = "mdi:air-conditioner"
     _attr_should_poll = False
-    _attr_supported_features = (
-        FanEntityFeature.SET_SPEED
-        | FanEntityFeature.PRESET_MODE
-        | FanEntityFeature.TURN_ON
-        | FanEntityFeature.TURN_OFF
-    )
+    _attr_supported_features = FanEntityFeature.SET_SPEED | FanEntityFeature.PRESET_MODE | FanEntityFeature.TURN_ON | FanEntityFeature.TURN_OFF
     _attr_preset_modes = list(PRESET_MODES)
     _attr_speed_count = len(FAN_SPEEDS)
     _attr_has_entity_name = True
@@ -143,7 +138,8 @@ class ComfoConnectFan(FanEntity):
         self.schedule_update_ha_state()
 
     async def async_update(self) -> None:
-        """Read the authoritative mode once at startup (update_before_add).
+        """
+        Read the authoritative mode once at startup (update_before_add).
 
         The operating-mode PDO is only pushed on change, so without this the
         preset would stay None/stale after a restart until the next push.

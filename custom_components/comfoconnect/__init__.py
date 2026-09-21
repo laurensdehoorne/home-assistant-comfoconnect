@@ -171,7 +171,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     reconnect_lock = asyncio.Lock()
 
     async def restart_connection_if_dead() -> None:
-        """Restart the connection when the library's reconnect loop is gone.
+        """
+        Restart the connection when the library's reconnect loop is gone.
 
         The reconnect loop normally recovers from a dropped connection by
         itself, but it stops for good if it ever ends with an unexpected
@@ -192,7 +193,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.debug("Reconnecting to the bridge did not succeed (yet): %s", err)
 
     async def send_keepalive(now) -> None:
-        """Probe the bridge and report availability.
+        """
+        Probe the bridge and report availability.
 
         ComfoConnect.connect() runs its own internal reconnect loop, so we must
         not call connect() again here while that loop is alive: doing so spawns
@@ -245,7 +247,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 class SafeEventBus(EventBus):
-    """An event bus that tolerates replies we are no longer waiting for.
+    """
+    An event bus that tolerates replies we are no longer waiting for.
 
     The library deletes the listeners of a reference right after emitting, so a
     late or duplicate reply for a reference that has no listeners left raises a
@@ -322,7 +325,8 @@ class ComfoConnectBridge(ComfoConnect):
             _LOGGER.debug("Error while closing the connection to the bridge: %s", err)
 
     async def _process_message(self):
-        """Process a message from the bridge without killing the read loop.
+        """
+        Process a message from the bridge without killing the read loop.
 
         The library only translates an incomplete read into a disconnect. Any
         other error escapes the read loop and terminates the reconnect loop with
@@ -352,7 +356,8 @@ class ComfoConnectBridge(ComfoConnect):
             _LOGGER.debug("Could not disable timer %d of schedule %d: %s", timer, subunit, err)
 
     async def set_speed(self, speed):
-        """Set the ventilation speed, like the ComfoControl app does.
+        """
+        Set the ventilation speed, like the ComfoControl app does.
 
         The app first cancels the boost, away and cooker hood timers
         (cancelPlusMinTimers), since those take priority over the preset.
@@ -366,7 +371,8 @@ class ComfoConnectBridge(ComfoConnect):
         await super().set_speed(speed)
 
     async def set_comfocool_mode(self, mode, timeout=-1):
-        """Set the ComfoCool mode (auto / off).
+        """
+        Set the ComfoCool mode (auto / off).
 
         aiocomfoconnect enables the ComfoCool-off timer with value 0 (auto);
         the ComfoControl app uses value 1 (off).

@@ -9,17 +9,17 @@ from datetime import timedelta
 from functools import partial
 from typing import Any, Callable, cast
 
-from aiocomfoconnect.exceptions import (
-    AioComfoConnectNotConnected,
-    AioComfoConnectTimeout,
-    ComfoConnectError,
-)
 from aiocomfoconnect.const import (
     ComfoCoolMode,
     VentilationBalance,
     VentilationMode,
     VentilationSetting,
     VentilationTemperatureProfile,
+)
+from aiocomfoconnect.exceptions import (
+    AioComfoConnectNotConnected,
+    AioComfoConnectTimeout,
+    ComfoConnectError,
 )
 from aiocomfoconnect.sensors import (
     SENSOR_BYPASS_ACTIVATION_STATE,
@@ -62,9 +62,7 @@ class ComfoconnectSelectDescriptionMixin:
 
 
 @dataclass
-class ComfoconnectSelectEntityDescription(
-    SelectEntityDescription, ComfoconnectSelectDescriptionMixin
-):
+class ComfoconnectSelectEntityDescription(SelectEntityDescription, ComfoconnectSelectDescriptionMixin):
     """Describes ComfoConnect select entity."""
 
     # Sensors (PDOs) that push the current value. sensor_value_fn receives the
@@ -80,7 +78,8 @@ async def _get_boost_option(ccb: ComfoConnectBridge) -> str | None:
 
 
 def _balance_from_fan_timers(values: dict[int, Any]) -> str | None:
-    """Map the exhaust (F12) and supply (F22) fan timer values to a balance mode.
+    """
+    Map the exhaust (F12) and supply (F22) fan timer values to a balance mode.
 
     A value of 1 means that the fan is switched off by its timer.
     """
@@ -168,8 +167,7 @@ SELECT_TYPES = (
         icon="mdi:fan-plus",
         get_value_fn=_get_boost_option,
         set_value_fn=lambda ccb, option: (
-            cast(Coroutine, ccb.set_boost(False)) if option == "Off" else
-            cast(Coroutine, ccb.set_boost(True, int(option.split()[0]) * 60))
+            cast(Coroutine, ccb.set_boost(False)) if option == "Off" else cast(Coroutine, ccb.set_boost(True, int(option.split()[0]) * 60))
         ),
         options=["Off", "10 Minutes", "20 Minutes", "30 Minutes", "40 Minutes", "50 Minutes", "60 Minutes"],
         # The active preset timer: while a boost timer is active the chosen
@@ -188,10 +186,7 @@ async def async_setup_entry(
     """Set up the ComfoConnect selects."""
     ccb = hass.data[DOMAIN][config_entry.entry_id]
 
-    selects = [
-        ComfoConnectSelect(ccb=ccb, config_entry=config_entry, description=description)
-        for description in SELECT_TYPES
-    ]
+    selects = [ComfoConnectSelect(ccb=ccb, config_entry=config_entry, description=description) for description in SELECT_TYPES]
 
     async_add_entities(selects, True)
 

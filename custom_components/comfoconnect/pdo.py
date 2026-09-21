@@ -1,4 +1,5 @@
-"""PDO definitions that are missing or incorrect in aiocomfoconnect.
+"""
+PDO definitions that are missing or incorrect in aiocomfoconnect.
 
 The ids, types and value meanings below are taken from the official Zehnder
 ComfoControl app (CNRPDORegister and the HRU*Object enums).
