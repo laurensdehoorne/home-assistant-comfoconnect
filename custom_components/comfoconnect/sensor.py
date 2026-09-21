@@ -13,12 +13,20 @@ from aiocomfoconnect.sensors import (
     SENSOR_ANALOG_INPUT_2,
     SENSOR_ANALOG_INPUT_3,
     SENSOR_ANALOG_INPUT_4,
+    SENSOR_AVOIDED_COOLING,
+    SENSOR_AVOIDED_COOLING_TOTAL,
+    SENSOR_AVOIDED_COOLING_TOTAL_YEAR,
+    SENSOR_AVOIDED_HEATING,
+    SENSOR_AVOIDED_HEATING_TOTAL,
+    SENSOR_AVOIDED_HEATING_TOTAL_YEAR,
     SENSOR_BYPASS_STATE,
     SENSOR_COMFOCOOL_CONDENSOR_TEMP,
     SENSOR_COMFOFOND_GHE_STATE,
     SENSOR_COMFOFOND_TEMP_GROUND,
     SENSOR_COMFOFOND_TEMP_OUTDOOR,
+    SENSOR_COMFORTCONTROL_MODE,
     SENSOR_DAYS_TO_REPLACE_FILTER,
+    SENSOR_DEVICE_STATE,
     SENSOR_FAN_EXHAUST_DUTY,
     SENSOR_FAN_EXHAUST_FLOW,
     SENSOR_FAN_EXHAUST_SPEED,
@@ -30,11 +38,16 @@ from aiocomfoconnect.sensors import (
     SENSOR_HUMIDITY_EXTRACT,
     SENSOR_HUMIDITY_OUTDOOR,
     SENSOR_HUMIDITY_SUPPLY,
+    SENSOR_NEXT_CHANGE_FAN,
+    SENSOR_OPERATING_MODE_2,
     SENSOR_POWER_USAGE,
     SENSOR_POWER_USAGE_TOTAL,
+    SENSOR_POWER_USAGE_TOTAL_YEAR,
     SENSOR_PREHEATER_POWER,
     SENSOR_PREHEATER_POWER_TOTAL,
+    SENSOR_PREHEATER_POWER_TOTAL_YEAR,
     SENSOR_RMOT,
+    SENSOR_TARGET_TEMPERATURE,
     SENSOR_TEMPERATURE_EXHAUST,
     SENSOR_TEMPERATURE_EXTRACT,
     SENSOR_TEMPERATURE_OUTDOOR,
@@ -52,6 +65,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
+    CONCENTRATION_PARTS_PER_MILLION,
     PERCENTAGE,
     REVOLUTIONS_PER_MINUTE,
     UnitOfElectricPotential,
@@ -68,6 +82,17 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import Throttle
 
 from . import DOMAIN, SIGNAL_COMFOCONNECT_AVAILABLE, SIGNAL_COMFOCONNECT_UPDATE_RECEIVED, ComfoConnectBridge
+from .pdo import (
+    FLOW_UNITS,
+    OPERATING_STATES,
+    PRESET_TIMERS,
+    SENSOR_CO2_ZONE_BASE,
+    SENSOR_FLOW_UNIT,
+    SENSOR_VALVE_BYPASS_POSITION,
+    SENSOR_VALVE_EXTRACT_POSITION,
+    SENSOR_VENTILATION_STATES,
+)
+from .pdo import SENSORS as EXTRA_SENSORS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -90,6 +115,8 @@ class ComfoconnectSensorEntityDescription(SensorEntityDescription, ComfoconnectR
     # Ignore a pushed value of 0 (the bridge emits a spurious 0 for many
     # sensors right after a reconnect). Auto-enabled for temperature/humidity.
     ignore_zero: bool = False
+    # The value is an airflow in the unit configured on the unit (PDO 224).
+    flow_unit: bool = False
 
 
 SENSOR_TYPES = (
@@ -227,6 +254,7 @@ SENSOR_TYPES = (
         ccb_sensor=SENSORS.get(SENSOR_FAN_SUPPLY_FLOW),
         entity_category=EntityCategory.DIAGNOSTIC,
         throttle=True,
+        flow_unit=True,
     ),
     ComfoconnectSensorEntityDescription(
         key=SENSOR_FAN_EXHAUST_FLOW,
@@ -237,6 +265,7 @@ SENSOR_TYPES = (
         ccb_sensor=SENSORS.get(SENSOR_FAN_EXHAUST_FLOW),
         entity_category=EntityCategory.DIAGNOSTIC,
         throttle=True,
+        flow_unit=True,
     ),
     ComfoconnectSensorEntityDescription(
         key=SENSOR_BYPASS_STATE,
@@ -392,6 +421,186 @@ SENSOR_TYPES = (
         entity_registry_enabled_default=False,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_DEVICE_STATE,
+        device_class=SensorDeviceClass.ENUM,
+        translation_key="operating_state",
+        name="Operating state",
+        icon="mdi:state-machine",
+        options=list(OPERATING_STATES.values()),
+        ccb_sensor=SENSORS.get(SENSOR_DEVICE_STATE),
+        entity_category=EntityCategory.DIAGNOSTIC,
+        mapping=OPERATING_STATES.get,
+        # 0 (initialization) is also what the bridge pushes right after a reconnect.
+        ignore_zero=True,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_OPERATING_MODE_2,
+        device_class=SensorDeviceClass.ENUM,
+        translation_key="preset_timer",
+        name="Active ventilation timer",
+        icon="mdi:timer-cog-outline",
+        options=list(PRESET_TIMERS.values()),
+        ccb_sensor=SENSORS.get(SENSOR_OPERATING_MODE_2),
+        entity_category=EntityCategory.DIAGNOSTIC,
+        mapping=PRESET_TIMERS.get,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_NEXT_CHANGE_FAN,
+        device_class=SensorDeviceClass.DURATION,
+        name="Active ventilation timer remaining",
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        icon="mdi:timer-sand",
+        ccb_sensor=SENSORS.get(SENSOR_NEXT_CHANGE_FAN),
+        entity_category=EntityCategory.DIAGNOSTIC,
+        # -1 means the timer runs indefinitely.
+        mapping=lambda x: None if x < 0 else x,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_COMFORTCONTROL_MODE,
+        device_class=SensorDeviceClass.ENUM,
+        translation_key="sensor_ventilation",
+        name="Sensor based ventilation",
+        icon="mdi:leaf",
+        options=list(SENSOR_VENTILATION_STATES.values()),
+        ccb_sensor=SENSORS.get(SENSOR_COMFORTCONTROL_MODE),
+        entity_category=EntityCategory.DIAGNOSTIC,
+        mapping=SENSOR_VENTILATION_STATES.get,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_TARGET_TEMPERATURE,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Target temperature",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        ccb_sensor=SENSORS.get(SENSOR_TARGET_TEMPERATURE),
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_VALVE_BYPASS_POSITION,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Bypass valve position",
+        native_unit_of_measurement=PERCENTAGE,
+        icon="mdi:valve",
+        ccb_sensor=EXTRA_SENSORS.get(SENSOR_VALVE_BYPASS_POSITION),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=True,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_VALVE_EXTRACT_POSITION,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Extract valve position",
+        native_unit_of_measurement=PERCENTAGE,
+        icon="mdi:valve",
+        ccb_sensor=EXTRA_SENSORS.get(SENSOR_VALVE_EXTRACT_POSITION),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=True,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_POWER_USAGE_TOTAL_YEAR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        name="Ventilation energy usage this year",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        ccb_sensor=SENSORS.get(SENSOR_POWER_USAGE_TOTAL_YEAR),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=True,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_PREHEATER_POWER_TOTAL_YEAR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        name="Preheater energy usage this year",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        ccb_sensor=SENSORS.get(SENSOR_PREHEATER_POWER_TOTAL_YEAR),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=True,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_AVOIDED_HEATING,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Avoided heating power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        ccb_sensor=SENSORS.get(SENSOR_AVOIDED_HEATING),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=True,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_AVOIDED_HEATING_TOTAL_YEAR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        name="Avoided heating energy this year",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        ccb_sensor=SENSORS.get(SENSOR_AVOIDED_HEATING_TOTAL_YEAR),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=True,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_AVOIDED_HEATING_TOTAL,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        name="Avoided heating energy",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        ccb_sensor=SENSORS.get(SENSOR_AVOIDED_HEATING_TOTAL),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=True,
+        ignore_zero=True,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_AVOIDED_COOLING,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Avoided cooling power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        ccb_sensor=SENSORS.get(SENSOR_AVOIDED_COOLING),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=True,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_AVOIDED_COOLING_TOTAL_YEAR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        name="Avoided cooling energy this year",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        ccb_sensor=SENSORS.get(SENSOR_AVOIDED_COOLING_TOTAL_YEAR),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=True,
+    ),
+    ComfoconnectSensorEntityDescription(
+        key=SENSOR_AVOIDED_COOLING_TOTAL,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        name="Avoided cooling energy",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        ccb_sensor=SENSORS.get(SENSOR_AVOIDED_COOLING_TOTAL),
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        throttle=True,
+        ignore_zero=True,
+    ),
+    *(
+        ComfoconnectSensorEntityDescription(
+            key=SENSOR_CO2_ZONE_BASE + zone,
+            device_class=SensorDeviceClass.CO2,
+            state_class=SensorStateClass.MEASUREMENT,
+            name=f"CO2 zone {zone}",
+            native_unit_of_measurement=CONCENTRATION_PARTS_PER_MILLION,
+            ccb_sensor=EXTRA_SENSORS.get(SENSOR_CO2_ZONE_BASE + zone),
+            entity_registry_enabled_default=False,
+            throttle=True,
+            ignore_zero=True,
+        )
+        for zone in range(1, 9)
+    ),
 )
 
 
@@ -464,6 +673,23 @@ class ComfoConnectSensor(RestoreSensor):
             )
         )
         await self._ccb.register_sensor(self.entity_description.ccb_sensor)
+
+        if self.entity_description.flow_unit:
+            self.async_on_remove(
+                async_dispatcher_connect(
+                    self.hass,
+                    SIGNAL_COMFOCONNECT_UPDATE_RECEIVED.format(self._ccb.uuid, SENSOR_FLOW_UNIT),
+                    self._handle_flow_unit_update,
+                )
+            )
+            await self._ccb.register_sensor(EXTRA_SENSORS[SENSOR_FLOW_UNIT])
+
+    def _handle_flow_unit_update(self, value: int) -> None:
+        """Use the airflow unit that is configured on the unit."""
+        if (unit := FLOW_UNITS.get(value)) is None or unit == self.native_unit_of_measurement:
+            return
+        self._attr_native_unit_of_measurement = unit
+        self.schedule_update_ha_state()
 
     def _handle_availability_update(self, available: bool) -> None:
         """Handle availability updates."""

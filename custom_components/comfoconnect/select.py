@@ -6,6 +6,7 @@ import logging
 from collections.abc import Awaitable, Coroutine
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import partial
 from typing import Any, Callable, cast
 
 from aiocomfoconnect.exceptions import (
@@ -22,8 +23,8 @@ from aiocomfoconnect.const import (
 )
 from aiocomfoconnect.sensors import (
     SENSOR_BYPASS_ACTIVATION_STATE,
-    SENSOR_COMFOCOOL_STATE,
     SENSOR_OPERATING_MODE,
+    SENSOR_OPERATING_MODE_2,
     SENSOR_PROFILE_TEMPERATURE,
     SENSORS,
 )
@@ -36,6 +37,8 @@ from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import DOMAIN, SIGNAL_COMFOCONNECT_AVAILABLE, SIGNAL_COMFOCONNECT_UPDATE_RECEIVED, ComfoConnectBridge
+from .pdo import BOOST_TIMERS, SENSOR_COMFOCOOL_MODE, SENSOR_EXHAUST_FAN_TIMER, SENSOR_SUPPLY_FAN_TIMER
+from .pdo import SENSORS as EXTRA_SENSORS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,13 +67,32 @@ class ComfoconnectSelectEntityDescription(
 ):
     """Describes ComfoConnect select entity."""
 
-    sensor: AioComfoConnectSensor = None
-    sensor_value_fn: Callable[[str], Any] = None
+    # Sensors (PDOs) that push the current value. sensor_value_fn receives the
+    # latest value of each of them (by sensor id) once all have been received,
+    # and returns the option, or None when the values don't map to an option.
+    sensors: tuple[AioComfoConnectSensor, ...] = ()
+    sensor_value_fn: Callable[[dict[int, Any]], str | None] = None
 
 
 async def _get_boost_option(ccb: ComfoConnectBridge) -> str | None:
     """Map get_boost() bool to a select option string."""
     return None if await ccb.get_boost() else "Off"
+
+
+def _balance_from_fan_timers(values: dict[int, Any]) -> str | None:
+    """Map the exhaust (F12) and supply (F22) fan timer values to a balance mode.
+
+    A value of 1 means that the fan is switched off by its timer.
+    """
+    exhaust_off = values[SENSOR_EXHAUST_FAN_TIMER] == 1
+    supply_off = values[SENSOR_SUPPLY_FAN_TIMER] == 1
+    if exhaust_off and supply_off:
+        return None
+    if exhaust_off:
+        return VentilationBalance.SUPPLY_ONLY
+    if supply_off:
+        return VentilationBalance.EXHAUST_ONLY
+    return VentilationBalance.BALANCE
 
 
 async def _get_comfocool_option(ccb: ComfoConnectBridge) -> str:
@@ -87,8 +109,8 @@ SELECT_TYPES = (
         get_value_fn=lambda ccb: cast(Coroutine, ccb.get_mode()),
         set_value_fn=lambda ccb, option: cast(Coroutine, ccb.set_mode(option)),
         options=[VentilationMode.AUTO, VentilationMode.MANUAL],
-        sensor=SENSORS.get(SENSOR_OPERATING_MODE),
-        sensor_value_fn=lambda value: {-1: VentilationMode.AUTO, 1: VentilationMode.MANUAL}.get(value),
+        sensors=(SENSORS.get(SENSOR_OPERATING_MODE),),
+        sensor_value_fn=lambda values: {-1: VentilationMode.AUTO, 1: VentilationMode.MANUAL}.get(values[SENSOR_OPERATING_MODE]),
     ),
     ComfoconnectSelectEntityDescription(
         key="bypass_mode",
@@ -98,8 +120,10 @@ SELECT_TYPES = (
         get_value_fn=lambda ccb: cast(Coroutine, ccb.get_bypass()),
         set_value_fn=lambda ccb, option: cast(Coroutine, ccb.set_bypass(option)),
         options=[VentilationSetting.AUTO, VentilationSetting.ON, VentilationSetting.OFF],
-        sensor=SENSORS.get(SENSOR_BYPASS_ACTIVATION_STATE),
-        sensor_value_fn=lambda value: {0: VentilationSetting.AUTO, 1: VentilationSetting.ON, 2: VentilationSetting.OFF}.get(value),
+        sensors=(SENSORS.get(SENSOR_BYPASS_ACTIVATION_STATE),),
+        sensor_value_fn=lambda values: {0: VentilationSetting.AUTO, 1: VentilationSetting.ON, 2: VentilationSetting.OFF}.get(
+            values[SENSOR_BYPASS_ACTIVATION_STATE]
+        ),
     ),
     ComfoconnectSelectEntityDescription(
         key="balance_mode",
@@ -108,6 +132,8 @@ SELECT_TYPES = (
         get_value_fn=lambda ccb: cast(Coroutine, ccb.get_balance_mode()),
         set_value_fn=lambda ccb, option: cast(Coroutine, ccb.set_balance_mode(option)),
         options=[VentilationBalance.BALANCE, VentilationBalance.SUPPLY_ONLY, VentilationBalance.EXHAUST_ONLY],
+        sensors=(EXTRA_SENSORS.get(SENSOR_EXHAUST_FAN_TIMER), EXTRA_SENSORS.get(SENSOR_SUPPLY_FAN_TIMER)),
+        sensor_value_fn=_balance_from_fan_timers,
     ),
     ComfoconnectSelectEntityDescription(
         key="temperature_profile",
@@ -117,12 +143,12 @@ SELECT_TYPES = (
         get_value_fn=lambda ccb: cast(Coroutine, ccb.get_temperature_profile()),
         set_value_fn=lambda ccb, option: cast(Coroutine, ccb.set_temperature_profile(option)),
         options=[VentilationTemperatureProfile.WARM, VentilationTemperatureProfile.NORMAL, VentilationTemperatureProfile.COOL],
-        sensor=SENSORS.get(SENSOR_PROFILE_TEMPERATURE),
-        sensor_value_fn=lambda value: {
+        sensors=(SENSORS.get(SENSOR_PROFILE_TEMPERATURE),),
+        sensor_value_fn=lambda values: {
             0: VentilationTemperatureProfile.NORMAL,
             1: VentilationTemperatureProfile.COOL,
             2: VentilationTemperatureProfile.WARM,
-        }.get(value),
+        }.get(values[SENSOR_PROFILE_TEMPERATURE]),
     ),
     ComfoconnectSelectEntityDescription(
         key="comfocool",
@@ -131,8 +157,9 @@ SELECT_TYPES = (
         get_value_fn=_get_comfocool_option,
         set_value_fn=lambda ccb, option: cast(Coroutine, ccb.set_comfocool_mode(option)),
         options=[ComfoCoolMode.AUTO, ComfoCoolMode.OFF],
-        sensor=SENSORS.get(SENSOR_COMFOCOOL_STATE),
-        sensor_value_fn=lambda value: {0: ComfoCoolMode.OFF, 1: ComfoCoolMode.AUTO}.get(value),
+        # The ComfoCool-off timer value (0 = auto, 1 = off), not the compressor state.
+        sensors=(EXTRA_SENSORS.get(SENSOR_COMFOCOOL_MODE),),
+        sensor_value_fn=lambda values: {0: ComfoCoolMode.AUTO, 1: ComfoCoolMode.OFF}.get(values[SENSOR_COMFOCOOL_MODE]),
     ),
     # Boost mode with Off option added
     ComfoconnectSelectEntityDescription(
@@ -145,6 +172,10 @@ SELECT_TYPES = (
             cast(Coroutine, ccb.set_boost(True, int(option.split()[0]) * 60))
         ),
         options=["Off", "10 Minutes", "20 Minutes", "30 Minutes", "40 Minutes", "50 Minutes", "60 Minutes"],
+        # The active preset timer: while a boost timer is active the chosen
+        # duration is unknown, so keep the current option (None).
+        sensors=(SENSORS.get(SENSOR_OPERATING_MODE_2),),
+        sensor_value_fn=lambda values: None if values[SENSOR_OPERATING_MODE_2] in BOOST_TIMERS else "Off",
     ),
 )
 
@@ -181,6 +212,7 @@ class ComfoConnectSelect(SelectEntity):
         self._ccb = ccb
         self.entity_description = description
         self._fail_count = 0
+        self._sensor_values: dict[int, Any] = {}
         # Always poll the authoritative RMI value (slowly, see SCAN_INTERVAL).
         # Sensor-backed selects additionally receive push updates for
         # responsiveness; the poll corrects stale values pushed on reconnect.
@@ -200,22 +232,16 @@ class ComfoConnectSelect(SelectEntity):
             )
         )
 
-        if not self.entity_description.sensor:
-            return
-
-        _LOGGER.debug(
-            "Registering for sensor %s (%d)",
-            self.entity_description.sensor.name,
-            self.entity_description.sensor.id,
-        )
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                SIGNAL_COMFOCONNECT_UPDATE_RECEIVED.format(self._ccb.uuid, self.entity_description.sensor.id),
-                self._handle_update,
+        for sensor in self.entity_description.sensors:
+            _LOGGER.debug("Registering for sensor %s (%d)", sensor.name, sensor.id)
+            self.async_on_remove(
+                async_dispatcher_connect(
+                    self.hass,
+                    SIGNAL_COMFOCONNECT_UPDATE_RECEIVED.format(self._ccb.uuid, sensor.id),
+                    partial(self._handle_update, sensor),
+                )
             )
-        )
-        await self._ccb.register_sensor(self.entity_description.sensor)
+            await self._ccb.register_sensor(sensor)
 
     def _handle_availability_update(self, available: bool) -> None:
         """Handle availability updates."""
@@ -229,15 +255,18 @@ class ComfoConnectSelect(SelectEntity):
         else:
             self.schedule_update_ha_state()
 
-    def _handle_update(self, value):
+    def _handle_update(self, sensor: AioComfoConnectSensor, value):
         """Handle update callbacks."""
-        _LOGGER.debug(
-            "Handle update for sensor %s (%s): %s",
-            self.entity_description.sensor.name,
-            self.entity_description.sensor.id,
-            value,
-        )
-        self._attr_current_option = self.entity_description.sensor_value_fn(value)
+        _LOGGER.debug("Handle update for sensor %s (%s): %s", sensor.name, sensor.id, value)
+        self._sensor_values[sensor.id] = value
+        if len(self._sensor_values) < len(self.entity_description.sensors):
+            return
+
+        option = self.entity_description.sensor_value_fn(self._sensor_values)
+        if option is None:
+            # Unknown or transient value: keep the current option.
+            return
+        self._attr_current_option = option
         self.schedule_update_ha_state()
 
     async def async_update(self) -> None:
@@ -262,6 +291,7 @@ class ComfoConnectSelect(SelectEntity):
 
         # Successful poll: clear the failure streak and restore availability.
         self._fail_count = 0
+        self._sensor_values: dict[int, Any] = {}
         self._attr_available = True
         if value is not None:
             self._attr_current_option = value

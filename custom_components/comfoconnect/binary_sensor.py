@@ -16,6 +16,7 @@ from aiocomfoconnect.sensors import (
     Sensor as AioComfoConnectSensor,
 )
 from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
     BinarySensorEntity,
     BinarySensorEntityDescription,
 )
@@ -27,6 +28,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from . import DOMAIN, SIGNAL_COMFOCONNECT_AVAILABLE, SIGNAL_COMFOCONNECT_UPDATE_RECEIVED, ComfoConnectBridge
+from .pdo import SENSOR_ALARM
+from .pdo import SENSORS as EXTRA_SENSORS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +47,13 @@ class ComfoconnectBinarySensorEntityDescription(BinarySensorEntityDescription, C
 
 
 SENSOR_TYPES = (
+    ComfoconnectBinarySensorEntityDescription(
+        key=SENSOR_ALARM,
+        name="Alarm",
+        device_class=BinarySensorDeviceClass.PROBLEM,
+        ccb_sensor=EXTRA_SENSORS.get(SENSOR_ALARM),
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
     ComfoconnectBinarySensorEntityDescription(
         key=SENSOR_SEASON_HEATING_ACTIVE,
         name="Heating Season Active",
@@ -67,7 +77,7 @@ SENSOR_TYPES = (
     ),
     ComfoconnectBinarySensorEntityDescription(
         key=SENSOR_COMFOCOOL_STATE,
-        name="ComfoCool state",
+        name="ComfoCool compressor",
         ccb_sensor=SENSORS.get(SENSOR_COMFOCOOL_STATE),
         entity_registry_enabled_default=False,
         entity_category=EntityCategory.DIAGNOSTIC,

@@ -29,6 +29,42 @@
           "off": "Off"
         }
       }
+    },
+    "sensor": {
+      "operating_state": {
+        "state": {
+          "initialization": "Initialization",
+          "normal": "Normal",
+          "filter_wizard": "Filter wizard",
+          "commissioning_wizard": "Commissioning wizard",
+          "supplier_factory": "Supplier factory",
+          "zehnder_factory": "Zehnder factory",
+          "standby": "Standby",
+          "away": "Away",
+          "dfc": "DFC"
+        }
+      },
+      "preset_timer": {
+        "state": {
+          "none": "None",
+          "preset": "Preset",
+          "preset_rf": "Preset (RF)",
+          "preset_analog": "Preset (analog input)",
+          "preset_rf_analog": "Preset (RF + analog input)",
+          "manual": "Manual",
+          "boost": "Boost",
+          "boost_rf": "Boost (RF)",
+          "boost_switch": "Boost (switch)",
+          "away": "Away"
+        }
+      },
+      "sensor_ventilation": {
+        "state": {
+          "disabled": "Disabled",
+          "active": "Active",
+          "overruling": "Overruling"
+        }
+      }
     }
   },
   "config": {

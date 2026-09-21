@@ -8,6 +8,7 @@ from datetime import timedelta
 
 from aiocomfoconnect import ComfoConnect, discover_bridges
 from aiocomfoconnect.bridge import EventBus
+from aiocomfoconnect.const import SUBUNIT_01, SUBUNIT_05, UNIT_SCHEDULE, ComfoCoolMode
 from aiocomfoconnect.exceptions import (
     AioComfoConnectNotConnected,
     AioComfoConnectTimeout,
@@ -20,7 +21,7 @@ from aiocomfoconnect.properties import (
     PROPERTY_NAME,
 )
 from aiocomfoconnect.sensors import Sensor
-from aiocomfoconnect.util import version_decode
+from aiocomfoconnect.util import bytestring, version_decode
 from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
 from homeassistant.const import CONF_HOST, EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import HomeAssistant, callback
@@ -49,7 +50,22 @@ _LOGGER = logging.getLogger(__name__)
 SIGNAL_COMFOCONNECT_UPDATE_RECEIVED = "comfoconnect_update_{}_{}"
 SIGNAL_COMFOCONNECT_AVAILABLE = "comfoconnect_available_{}"
 
-KEEP_ALIVE_INTERVAL = timedelta(seconds=30)
+# The ComfoControl app probes every 5 seconds and drops the connection after
+# 10 seconds of silence. We probe a bit less often, but often enough to notice
+# a dead connection quickly.
+KEEP_ALIVE_INTERVAL = timedelta(seconds=10)
+
+# Schedule subunit and timer ids, as used by the ComfoControl app
+# (VentilationUnit.SchedulerInstances and HRUScheduleObject.*Timers).
+SUBUNIT_HOOD = 0x09
+TIMER_PRESET_BOOST = 0x06
+TIMER_PRESET_BOOST_RF = 0x07
+TIMER_PRESET_AWAY = 0x0B
+TIMER_HOOD = 0x01
+
+# Value of the ComfoCool-off timer that switches ComfoCool off
+# (HRUScheduleObject.ScheduleComfoCoolValues: AUTO = 0, OFF = 1).
+COMFOCOOL_VALUE_OFF = 0x01
 
 # Maximum time we wait for a watchdog-initiated reconnect to complete. The
 # reconnect loop keeps running in the background when this expires.
@@ -191,10 +207,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await bridge.cmd_time_request()
         except (AioComfoConnectNotConnected, AioComfoConnectTimeout):
             _LOGGER.debug("Keepalive failed; bridge unavailable (library will reconnect).")
-            dispatcher_send(hass, SIGNAL_COMFOCONNECT_AVAILABLE.format(bridge.uuid), False)
+            set_available(False)
             await restart_connection_if_dead()
         else:
-            dispatcher_send(hass, SIGNAL_COMFOCONNECT_AVAILABLE.format(bridge.uuid), True)
+            set_available(True)
+
+    last_available: bool | None = None
+
+    def set_available(available: bool) -> None:
+        """Notify the entities, but only when the availability changed."""
+        nonlocal last_available
+        if available == last_available:
+            return
+        last_available = available
+        dispatcher_send(hass, SIGNAL_COMFOCONNECT_AVAILABLE.format(bridge.uuid), available)
 
     entry.async_on_unload(async_track_time_interval(hass, send_keepalive, KEEP_ALIVE_INTERVAL))
 
@@ -317,6 +343,53 @@ class ComfoConnectBridge(ComfoConnect):
             if self.is_connected():
                 return
             raise AioComfoConnectNotConnected("The connection was closed.") from err
+
+    async def _disable_timer(self, subunit: int, timer: int) -> None:
+        """Disable a schedule timer entry, ignoring an error when it wasn't enabled."""
+        try:
+            await self.cmd_rmi_request(bytes([0x85, UNIT_SCHEDULE, subunit, timer]))
+        except ComfoConnectError as err:
+            _LOGGER.debug("Could not disable timer %d of schedule %d: %s", timer, subunit, err)
+
+    async def set_speed(self, speed):
+        """Set the ventilation speed, like the ComfoControl app does.
+
+        The app first cancels the boost, away and cooker hood timers
+        (cancelPlusMinTimers), since those take priority over the preset.
+        Without this, changing the speed during a boost has no visible effect
+        until the boost ends.
+        """
+        await self._disable_timer(SUBUNIT_01, TIMER_PRESET_BOOST)
+        await self._disable_timer(SUBUNIT_01, TIMER_PRESET_BOOST_RF)
+        await self._disable_timer(SUBUNIT_HOOD, TIMER_HOOD)
+        await self._disable_timer(SUBUNIT_01, TIMER_PRESET_AWAY)
+        await super().set_speed(speed)
+
+    async def set_comfocool_mode(self, mode, timeout=-1):
+        """Set the ComfoCool mode (auto / off).
+
+        aiocomfoconnect enables the ComfoCool-off timer with value 0 (auto);
+        the ComfoControl app uses value 1 (off).
+        """
+        if mode == ComfoCoolMode.OFF:
+            await self.cmd_rmi_request(
+                bytestring(
+                    [
+                        0x84,
+                        UNIT_SCHEDULE,
+                        SUBUNIT_05,
+                        0x01,
+                        0x00,
+                        0x00,
+                        0x00,
+                        0x00,
+                        timeout.to_bytes(4, "little", signed=True),
+                        COMFOCOOL_VALUE_OFF,
+                    ]
+                )
+            )
+            return
+        await super().set_comfocool_mode(mode, timeout)
 
     @callback
     def sensor_callback(self, sensor: Sensor, value):
