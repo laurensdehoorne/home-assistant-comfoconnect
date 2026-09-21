@@ -129,7 +129,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     device_registry = dr.async_get(hass)
 
     # Add Bridge to device registry
-    device_registry.async_get_or_create(
+    bridge_device = device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, bridge_info.serialNumber)},
         manufacturer="Zehnder",
@@ -147,7 +147,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         name=unit_name,
         model=unit_model,
         sw_version=version_decode(unit_firmware),
-        via_device=(DOMAIN, bridge_info.serialNumber),
+        via_device_id=bridge_device.id,
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
