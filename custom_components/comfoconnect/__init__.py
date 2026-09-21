@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import struct
+from dataclasses import dataclass
 from datetime import timedelta
 
 from aiocomfoconnect import ComfoConnect, discover_bridges
 from aiocomfoconnect.bridge import EventBus
-from aiocomfoconnect.const import SUBUNIT_01, SUBUNIT_05, UNIT_SCHEDULE, ComfoCoolMode
+from aiocomfoconnect.const import SUBUNIT_01, SUBUNIT_05, UNIT_SCHEDULE, UNIT_TEMPHUMCONTROL, ComfoCoolMode, PdoType
 from aiocomfoconnect.exceptions import (
     AioComfoConnectNotConnected,
     AioComfoConnectTimeout,
@@ -20,7 +23,7 @@ from aiocomfoconnect.properties import (
     PROPERTY_MODEL,
     PROPERTY_NAME,
 )
-from aiocomfoconnect.sensors import Sensor
+from aiocomfoconnect.sensors import SENSOR_RMOT, Sensor
 from aiocomfoconnect.util import bytestring, version_decode
 from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
 from homeassistant.const import CONF_HOST, EVENT_HOMEASSISTANT_STOP, Platform
@@ -39,6 +42,7 @@ from .const import CONF_LOCAL_UUID, CONF_UUID, DOMAIN
 
 PLATFORMS: list[Platform] = [
     Platform.FAN,
+    Platform.NUMBER,
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
     Platform.SELECT,
@@ -49,6 +53,7 @@ _LOGGER = logging.getLogger(__name__)
 
 SIGNAL_COMFOCONNECT_UPDATE_RECEIVED = "comfoconnect_update_{}_{}"
 SIGNAL_COMFOCONNECT_AVAILABLE = "comfoconnect_available_{}"
+SIGNAL_COMFOCONNECT_RMOT_LIMIT = "comfoconnect_rmot_limit_{}_{}"
 
 # The ComfoControl app probes every 5 seconds and drops the connection after
 # 10 seconds of silence. We probe a bit less often, but often enough to notice
@@ -246,6 +251,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 
+@dataclass
+class RmotLimit:
+    """An RMOT limit of the season detection, with its allowed range (in °C)."""
+
+    value: float
+    minimum: float
+    maximum: float
+    step: float
+
+
 class SafeEventBus(EventBus):
     """
     An event bus that tolerates replies we are no longer waiting for.
@@ -396,6 +411,39 @@ class ComfoConnectBridge(ComfoConnect):
             )
             return
         await super().set_comfocool_mode(mode, timeout)
+
+    async def get_rmot_limit(self, property_id: int) -> RmotLimit:
+        """Read an RMOT limit of the season detection, with its range and step."""
+        # 0x70 = actual value | range | step, each an INT16 in 0.1 °C.
+        result = await self.cmd_rmi_request(bytes([0x01, UNIT_TEMPHUMCONTROL, SUBUNIT_01, 0x70, property_id]))
+        if len(result.message) < 8:
+            raise ComfoConnectError(f"Unexpected response for RMOT limit {property_id}: {result.message.hex()}")
+        value, minimum, maximum, step = struct.unpack("<hhhh", result.message[:8])
+        return RmotLimit(value / 10, minimum / 10, maximum / 10, step / 10)
+
+    async def set_rmot_limit(self, property_id: int, value: float) -> None:
+        """Set an RMOT limit of the season detection (in °C)."""
+        await self.set_property_typed(UNIT_TEMPHUMCONTROL, SUBUNIT_01, property_id, round(value * 10), PdoType.TYPE_CN_INT16)
+        dispatcher_send(self.hass, SIGNAL_COMFOCONNECT_RMOT_LIMIT.format(self.uuid, property_id), value)
+
+    async def start_season_now(self, property_id: int) -> float:
+        """
+        Set an RMOT limit to the current RMOT, like the ComfoControl app does.
+
+        The app rounds the RMOT and the allowed range to whole degrees and
+        clamps the RMOT to that range. Returns the new limit.
+        """
+        rmot = self._sensors_values.get(SENSOR_RMOT)
+        if rmot is None:
+            raise ComfoConnectError("The current RMOT is not known yet")
+
+        def round_half_up(value: float) -> int:
+            return math.floor(value + 0.5)
+
+        limit = await self.get_rmot_limit(property_id)
+        value = min(max(round_half_up(rmot / 10), round_half_up(limit.minimum)), round_half_up(limit.maximum))
+        await self.set_rmot_limit(property_id, value)
+        return value
 
     @callback
     def sensor_callback(self, sensor: Sensor, value):

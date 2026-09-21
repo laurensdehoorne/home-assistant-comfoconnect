@@ -90,3 +90,9 @@ FLOW_UNITS = {
     2: "L/s",
     3: "m³/h",
 }
+
+# TEMPHUMCONTROL properties limitRMOTHeating / limitRMOTCooling, in 0.1 °C.
+# Heating season is active while the RMOT is below the heating limit, cooling
+# season while the RMOT is above the cooling limit.
+PROPERTY_RMOT_LIMIT_HEATING = 2
+PROPERTY_RMOT_LIMIT_COOLING = 3
