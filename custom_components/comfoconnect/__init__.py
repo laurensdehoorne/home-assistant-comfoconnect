@@ -603,7 +603,9 @@ class ComfoConnectBridge(ComfoConnect):
 
     async def get_filter_life_days(self) -> PropertyRange:
         """Read after how many days the filters should be replaced."""
-        return await self.get_property_range(UNIT_FILTER, PROPERTY_FILTER_LIFE_DAYS)
+        # The app only reads the actual value (the range comes from the app).
+        days = await self.get_single_property(UNIT_FILTER, SUBUNIT_01, PROPERTY_FILTER_LIFE_DAYS, PdoType.TYPE_CN_UINT16)
+        return PropertyRange(days, days, days, 0)
 
     async def set_filter_life_days(self, days: float) -> None:
         """Set after how many days the filters should be replaced."""

@@ -79,7 +79,7 @@ If not, you can add the integration through the UI by going to the integrations 
 ## Installer settings
 
 Some settings are only available in the installer menu of the ComfoControl app. To use them in Home Assistant, open the integration, choose
-**Configure** and enter the installer PIN of the unit. The PIN is checked against the unit, like the app does. Leave it empty to hide the installer
+**Configure** (or **Reconfigure**) and enter the installer PIN of the unit. The PIN is checked against the unit, like the app does. Leave it empty to hide the installer
 settings again.
 
 Currently this adds the airflow of each preset (away, low, medium and high). Changing installer settings affects how the unit ventilates your home,

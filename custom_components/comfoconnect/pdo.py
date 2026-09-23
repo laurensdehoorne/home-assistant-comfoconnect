@@ -102,8 +102,10 @@ FILTER_BEGIN_REPLACEMENT = 0x80
 FILTER_END_REPLACEMENT = 0x81
 FILTER_ABORT_REPLACEMENT = 0x82
 
-# FILTER property filterLifeDays (UINT16), with the choices the app offers.
-PROPERTY_FILTER_LIFE_DAYS = 2
+# FILTER property filterLifeDays (UINT16, firmware R1.9.0 and newer), with the
+# choices the app offers. (Property 2 is filterWarningDays: how many days in
+# advance the unit warns.)
+PROPERTY_FILTER_LIFE_DAYS = 3
 FILTER_LIFE_DAYS_MIN = 60
 FILTER_LIFE_DAYS_MAX = 180
 FILTER_LIFE_DAYS_STEP = 10

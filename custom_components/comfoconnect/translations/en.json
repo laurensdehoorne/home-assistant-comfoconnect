@@ -11,7 +11,9 @@
         "error": {
             "invalid_pin": "Invalid PIN",
             "invalid_host": "Could not find a ComfoConnect bridge at this address",
-            "wrong_bridge": "This is a different ComfoConnect bridge. Add it as a new integration instead."
+            "wrong_bridge": "This is a different ComfoConnect bridge. Add it as a new integration instead.",
+            "invalid_installer_pin": "This is not the installer PIN of the unit",
+            "cannot_connect": "Could not reach the ComfoConnect bridge"
         },
         "step": {
             "confirm": {
@@ -37,9 +39,10 @@
             },
             "reconfigure": {
                 "title": "Reconfigure the ComfoConnect LAN C bridge",
-                "description": "Enter the new hostname or IP address of the bridge, for example after its IP address changed.",
+                "description": "Enter the new hostname or IP address of the bridge, for example after its IP address changed. Optionally enter the installer PIN of the ventilation unit to show the installer settings (leave it empty to hide them).",
                 "data": {
-                    "host": "Host"
+                    "host": "Host",
+                    "installer_pin": "Installer PIN"
                 }
             }
         }

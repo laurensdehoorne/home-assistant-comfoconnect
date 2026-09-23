@@ -118,7 +118,7 @@ class ComfoConnectConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Change the address of the bridge, e.g. when its IP address changed."""
+        """Change the address of the bridge (e.g. when its IP address changed) and the installer PIN."""
         entry = self._get_reconfigure_entry()
         errors = {}
         if user_input is not None:
@@ -130,16 +130,30 @@ class ComfoConnectConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # A different bridge: that needs a new config entry (and registration).
                 errors["base"] = "wrong_bridge"
             else:
-                return self.async_update_reload_and_abort(
-                    entry,
-                    title=bridges[0].host,
-                    data_updates={CONF_HOST: bridges[0].host},
-                )
+                pin, errors = await _validate_installer_pin(self.hass, entry, user_input.get(CONF_INSTALLER_PIN))
+                if not errors:
+                    options = {CONF_INSTALLER_PIN: pin} if pin else {}
+                    # The update listener of the entry reloads it.
+                    self.hass.config_entries.async_update_entry(
+                        entry,
+                        title=bridges[0].host,
+                        data={**entry.data, CONF_HOST: bridges[0].host},
+                        options=options,
+                    )
+                    return self.async_abort(reason="reconfigure_successful")
 
         return self.async_show_form(
             step_id="reconfigure",
             errors=errors,
-            data_schema=vol.Schema({vol.Required(CONF_HOST, default=entry.data[CONF_HOST]): str}),
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_HOST, default=entry.data[CONF_HOST]): str,
+                    vol.Optional(
+                        CONF_INSTALLER_PIN,
+                        description={"suggested_value": entry.options.get(CONF_INSTALLER_PIN, "")},
+                    ): str,
+                }
+            ),
         )
 
     async def _register(self, pin: int = None) -> FlowResult:
@@ -224,20 +238,9 @@ class ComfoConnectOptionsFlow(config_entries.OptionsFlow):
         """Manage the options."""
         errors = {}
         if user_input is not None:
-            pin = (user_input.get(CONF_INSTALLER_PIN) or "").strip()
-            if not pin:
-                return self.async_create_entry(data={})
-
-            bridge = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
-            if bridge is None:
-                errors["base"] = "cannot_connect"
-            else:
-                try:
-                    if await bridge.check_installer_pin(pin):
-                        return self.async_create_entry(data={CONF_INSTALLER_PIN: pin.zfill(4)})
-                    errors[CONF_INSTALLER_PIN] = "invalid_installer_pin"
-                except (AioComfoConnectNotConnected, AioComfoConnectTimeout, ComfoConnectError):
-                    errors["base"] = "cannot_connect"
+            pin, errors = await _validate_installer_pin(self.hass, self.config_entry, user_input.get(CONF_INSTALLER_PIN))
+            if not errors:
+                return self.async_create_entry(data={CONF_INSTALLER_PIN: pin} if pin else {})
 
         return self.async_show_form(
             step_id="init",
@@ -247,7 +250,30 @@ class ComfoConnectOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_INSTALLER_PIN,
                         description={"suggested_value": self.config_entry.options.get(CONF_INSTALLER_PIN, "")},
-                    ): vol.All(str, vol.Match(r"^\s*\d{0,4}\s*$")),
+                    ): str,
                 }
             ),
         )
+
+
+async def _validate_installer_pin(hass, entry: config_entries.ConfigEntry, pin: str | None) -> tuple[str | None, dict[str, str]]:
+    """
+    Check an installer PIN against the unit.
+
+    Returns the normalized PIN (None when empty) and the form errors.
+    """
+    pin = (pin or "").strip()
+    if not pin:
+        return None, {}
+    if not pin.isdigit() or len(pin) > 4:
+        return None, {CONF_INSTALLER_PIN: "invalid_installer_pin"}
+
+    bridge = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if bridge is None:
+        return None, {"base": "cannot_connect"}
+    try:
+        if not await bridge.check_installer_pin(pin):
+            return None, {CONF_INSTALLER_PIN: "invalid_installer_pin"}
+    except (AioComfoConnectNotConnected, AioComfoConnectTimeout, ComfoConnectError):
+        return None, {"base": "cannot_connect"}
+    return pin.zfill(4), {}
