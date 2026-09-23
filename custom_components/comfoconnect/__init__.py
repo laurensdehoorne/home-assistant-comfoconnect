@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 import struct
@@ -10,7 +11,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from aiocomfoconnect import ComfoConnect, discover_bridges
-from aiocomfoconnect.bridge import EventBus
+from aiocomfoconnect import bridge as aiocomfoconnect_bridge
+from aiocomfoconnect.bridge import EventBus, Message
 from aiocomfoconnect.const import SUBUNIT_01, SUBUNIT_05, UNIT_SCHEDULE, UNIT_TEMPHUMCONTROL, ComfoCoolMode, PdoType
 from aiocomfoconnect.exceptions import (
     AioComfoConnectNotConnected,
@@ -23,6 +25,7 @@ from aiocomfoconnect.properties import (
     PROPERTY_MODEL,
     PROPERTY_NAME,
 )
+from aiocomfoconnect.protobuf import zehnder_pb2
 from aiocomfoconnect.sensors import SENSOR_RMOT, Sensor
 from aiocomfoconnect.util import bytestring, version_decode
 from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
@@ -72,9 +75,11 @@ TIMER_HOOD = 0x01
 # (HRUScheduleObject.ScheduleComfoCoolValues: AUTO = 0, OFF = 1).
 COMFOCOOL_VALUE_OFF = 0x01
 
-# Maximum time we wait for a watchdog-initiated reconnect to complete. The
-# reconnect loop keeps running in the background when this expires.
-RECONNECT_TIMEOUT = 30
+# Time to wait before connecting again after the connection failed or was lost.
+RECONNECT_DELAY = 5
+
+# How long the first connection may take before the setup is retried later.
+INITIAL_CONNECT_TIMEOUT = 30
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -129,7 +134,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except ComfoConnectNotAllowed:
             raise ConfigEntryAuthFailed("Access denied")
 
-        except ComfoConnectError as err:
+        except (AioComfoConnectTimeout, ComfoConnectError) as err:
             raise ConfigEntryNotReady from err
 
     hass.data[DOMAIN][entry.entry_id] = bridge
@@ -173,49 +178,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    reconnect_lock = asyncio.Lock()
-
-    async def restart_connection_if_dead() -> None:
-        """
-        Restart the connection when the library's reconnect loop is gone.
-
-        The reconnect loop normally recovers from a dropped connection by
-        itself, but it stops for good if it ever ends with an unexpected
-        exception. Without this watchdog the integration would then stay
-        offline until Home Assistant is restarted.
-        """
-        if bridge.reconnect_loop_alive() or reconnect_lock.locked():
-            return
-
-        async with reconnect_lock:
-            _LOGGER.warning("The reconnect loop is no longer running, reconnecting to bridge %s.", bridge.host)
-            await bridge.disconnect()
-            try:
-                async with asyncio.timeout(RECONNECT_TIMEOUT):
-                    await bridge.connect(entry.data[CONF_LOCAL_UUID])
-            except (TimeoutError, AioComfoConnectTimeout, ComfoConnectError, OSError) as err:
-                # The reconnect loop retries on its own from here on.
-                _LOGGER.debug("Reconnecting to the bridge did not succeed (yet): %s", err)
-
     async def send_keepalive(now) -> None:
         """
         Probe the bridge and report availability.
 
-        ComfoConnect.connect() runs its own internal reconnect loop, so we must
-        not call connect() again here while that loop is alive: doing so spawns
-        duplicate reconnect loops and read tasks, which get orphaned ("Task was
-        destroyed but it is pending!"). We only probe the bridge and update
-        entity availability; the library restores the connection on its own,
-        unless its reconnect loop died (see restart_connection_if_dead).
+        The bridge restores a lost connection by itself (see
+        ComfoConnectBridge._reconnect_loop); we only probe it and update the
+        availability of the entities.
         """
         _LOGGER.debug("Sending keepalive...")
         try:
             # Use cmd_time_request as a keepalive since cmd_keepalive doesn't send back a reply we can wait for
             await bridge.cmd_time_request()
-        except (AioComfoConnectNotConnected, AioComfoConnectTimeout):
-            _LOGGER.debug("Keepalive failed; bridge unavailable (library will reconnect).")
+        except (AioComfoConnectNotConnected, AioComfoConnectTimeout, ComfoConnectError):
+            _LOGGER.debug("Keepalive failed; bridge unavailable (reconnecting in the background).")
             set_available(False)
-            await restart_connection_if_dead()
         else:
             set_available(True)
 
@@ -294,32 +271,192 @@ class ComfoConnectBridge(ComfoConnect):
             alarm_callback=self.alarm_callback,
         )
         self.hass = hass
-        self._watched_tasks = set()
+        self._closing = False
+        self._reconnect_task: asyncio.Task | None = None
+        self._read_task: asyncio.Task | None = None
+        self._last_received = 0.0
+        self._session_refused = False
 
     async def connect(self, uuid: str) -> None:
-        """Connect to the bridge and keep an eye on its reconnect loop."""
-        await super().connect(uuid)
+        """
+        Connect to the bridge and keep the connection alive in the background.
 
-        # Retrieve the result of the reconnect loop when it ends, so a crash is
-        # logged by us instead of surfacing as "Task exception was never
-        # retrieved".
-        for task in self._tasks:
-            if task not in self._watched_tasks:
-                self._watched_tasks.add(task)
-                task.add_done_callback(self._reconnect_task_done)
+        This replaces the reconnect loop of aiocomfoconnect, which stops for
+        good when a reconnect is refused ("invalid state"), keeps reconnecting
+        after disconnect(), orphans its read task, and never gives up (nor
+        returns) when the bridge is unreachable at startup.
+        """
+        self._closing = False
+        connected = self._loop.create_future()
+        self._reconnect_task = self._loop.create_task(self._reconnect_loop(uuid, connected))
+        self._reconnect_task.add_done_callback(self._reconnect_task_done)
+        try:
+            await asyncio.wait_for(asyncio.shield(connected), INITIAL_CONNECT_TIMEOUT)
+        except TimeoutError as err:
+            connected.cancel()
+            await self.disconnect()
+            raise AioComfoConnectTimeout(f"Could not connect to the bridge at {self.host}") from err
+        except BaseException:
+            await self.disconnect()
+            raise
 
-    def reconnect_loop_alive(self) -> bool:
-        """Return True while the library's reconnect loop is still running."""
-        return any(not task.done() for task in self._tasks)
+    async def disconnect(self) -> None:
+        """Disconnect from the bridge and stop reconnecting."""
+        self._closing = True
+        if (task := self._reconnect_task) is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await self._close_connection()
+
+    async def _reconnect_loop(self, uuid: str, connected: asyncio.Future) -> None:
+        """(Re)connect to the bridge whenever the connection is lost, until disconnect()."""
+        try:
+            while not self._closing:
+                try:
+                    self._read_task = await self._connect(uuid)
+                    await self.cmd_start_session(True)
+                    self._session_refused = False
+
+                    # Buffer the sensor values for a moment: the bridge sends
+                    # invalid values right after connecting (see aiocomfoconnect).
+                    if self.sensor_delay:
+                        if self._sensor_hold is not None:
+                            self._sensor_hold.cancel()
+                        self._sensors_values = {}
+                        self._sensor_hold = self._loop.call_later(self.sensor_delay, self._unhold_sensors)
+
+                    # Register the sensors (again, when we lost the connection).
+                    for sensor in list(self._sensors.values()):
+                        await self.cmd_rpdo_request(sensor.id, sensor.type)
+
+                    if not connected.done():
+                        connected.set_result(True)
+
+                    # Wait until the connection is lost (or we are closing).
+                    await self._read_task
+
+                except ComfoConnectNotAllowed as err:
+                    if not connected.done():
+                        connected.set_exception(err)
+                        return
+                    # E.g. while another client holds the session. Keep trying,
+                    # but only warn once until a session succeeds again.
+                    log = _LOGGER.debug if self._session_refused else _LOGGER.warning
+                    log("The bridge refused the session, retrying every %d seconds: %s", RECONNECT_DELAY, err)
+                    self._session_refused = True
+
+                except (AioComfoConnectNotConnected, AioComfoConnectTimeout, ComfoConnectError, OSError) as err:
+                    _LOGGER.info("The connection to the bridge was lost or could not be made, retrying in %d seconds: %r", RECONNECT_DELAY, err)
+
+                except Exception:
+                    _LOGGER.exception("Unexpected error in the connection to the bridge, retrying in %d seconds", RECONNECT_DELAY)
+
+                await self._close_connection()
+                if not self._closing:
+                    await asyncio.sleep(RECONNECT_DELAY)
+        finally:
+            if not connected.done():
+                connected.set_exception(AioComfoConnectNotConnected("Disconnected before the connection was made"))
+
+    async def _close_connection(self) -> None:
+        """Stop the read task and close the socket."""
+        read_task, self._read_task = self._read_task, None
+        if read_task is not None:
+            if not read_task.done():
+                read_task.cancel()
+            try:
+                await read_task
+            except (asyncio.CancelledError, Exception) as err:
+                # Only retrieve the result, so it isn't reported as never retrieved.
+                _LOGGER.debug("The read task ended with: %r", err)
+        await self._disconnect()
 
     @callback
-    def _reconnect_task_done(self, task) -> None:
-        """Report why the reconnect loop stopped."""
-        self._watched_tasks.discard(task)
+    def _reconnect_task_done(self, task: asyncio.Task) -> None:
+        """Report it when the reconnect loop ends by itself (it shouldn't)."""
         if task.cancelled():
             return
         if err := task.exception():
-            _LOGGER.warning("The connection to the bridge stopped unexpectedly: %s", err)
+            _LOGGER.error("The connection to the bridge stopped unexpectedly: %r", err)
+
+    async def register_sensor(self, sensor: Sensor):
+        """
+        Register a sensor on the bridge.
+
+        Unlike aiocomfoconnect, this doesn't reset the last known value of a
+        sensor that is already registered (e.g. the RMOT, used by a sensor and
+        by the season buttons), and it doesn't fail while the connection is
+        down: the reconnect loop registers all sensors when it reconnects.
+        """
+        self._sensors[sensor.id] = sensor
+        self._sensors_values.setdefault(sensor.id, None)
+        try:
+            await self.cmd_rpdo_request(sensor.id, sensor.type)
+        except (AioComfoConnectNotConnected, AioComfoConnectTimeout) as err:
+            _LOGGER.debug("Sensor %d will be registered when the connection is back: %r", sensor.id, err)
+
+    def _sensor_callback(self, sensor_id, sensor_value):
+        """Process a sensor update, ignoring sensors that we didn't register (yet)."""
+        if sensor_id not in self._sensors:
+            # The bridge can send updates for PDOs that this client registered
+            # in an earlier session, before the entity registered it again.
+            _LOGGER.debug("Ignoring an update for unregistered sensor %s", sensor_id)
+            return
+        super()._sensor_callback(sensor_id, sensor_value)
+
+    async def _send(self, request, request_type, params: dict | None = None, reply: bool = True):
+        """
+        Send a command and wait for its reply.
+
+        Based on aiocomfoconnect's _send, with two differences:
+        - The message reference is reserved before anything is awaited, so
+          concurrent requests can't get the same reference (and each other's
+          reply).
+        - An unanswered request only drops the connection when the bridge sent
+          nothing at all while we waited, like the ComfoControl app, which
+          treats a connection as lost after a period of silence. Otherwise a
+          single slow reply (e.g. while many entities start up) makes us
+          reconnect and register everything again.
+        """
+        if not self.is_connected():
+            raise AioComfoConnectNotConnected
+
+        reference = self._reference
+        self._reference += 1
+
+        cmd = zehnder_pb2.GatewayOperation()
+        cmd.type = request_type
+        cmd.reference = reference
+
+        msg = request()
+        if params is not None:
+            for param, value in params.items():
+                if value is not None:
+                    setattr(msg, param, value)
+
+        message = Message(cmd, msg, self._local_uuid, self.uuid)
+
+        fut = self._loop.create_future()
+        if reply:
+            self._event_bus.add_listener(reference, fut)
+        else:
+            fut.set_result(None)
+
+        _LOGGER.debug("TX %s", message)
+        self._writer.write(message.encode())
+        await self._writer.drain()
+
+        timeout = aiocomfoconnect_bridge.TIMEOUT
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        except TimeoutError as exc:
+            if self._loop.time() - self._last_received >= timeout:
+                _LOGGER.warning("The bridge did not send anything for %d seconds, reconnecting.", timeout)
+                await self._disconnect()
+            else:
+                _LOGGER.debug("No reply from the bridge to request %d (type %d)", reference, request_type)
+            raise AioComfoConnectTimeout("Timeout while waiting for response from bridge") from exc
 
     async def _connect(self, uuid: str):
         """Connect to the bridge, using an event bus that survives stray replies."""
@@ -328,6 +465,7 @@ class ComfoConnectBridge(ComfoConnect):
         # The event bus is created (empty) by the connect above; replace it
         # before the read task gets a chance to process a message.
         self._event_bus = SafeEventBus()
+        self._last_received = self._loop.time()
 
         return read_task
 
@@ -350,6 +488,7 @@ class ComfoConnectBridge(ComfoConnect):
         """
         try:
             await super()._process_message()
+            self._last_received = self._loop.time()
         except AioComfoConnectNotConnected:
             raise
         except OSError as err:

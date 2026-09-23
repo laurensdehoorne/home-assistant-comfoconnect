@@ -65,7 +65,6 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    CONCENTRATION_PARTS_PER_MILLION,
     PERCENTAGE,
     REVOLUTIONS_PER_MINUTE,
     UnitOfElectricPotential,
@@ -93,6 +92,13 @@ from .pdo import (
     SENSOR_VENTILATION_STATES,
 )
 from .pdo import SENSORS as EXTRA_SENSORS
+
+try:
+    from homeassistant.const import UnitOfRatio
+
+    PARTS_PER_MILLION = UnitOfRatio.PARTS_PER_MILLION
+except ImportError:  # Home Assistant before UnitOfRatio was added
+    from homeassistant.const import CONCENTRATION_PARTS_PER_MILLION as PARTS_PER_MILLION
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -593,7 +599,7 @@ SENSOR_TYPES = (
             device_class=SensorDeviceClass.CO2,
             state_class=SensorStateClass.MEASUREMENT,
             name=f"CO2 zone {zone}",
-            native_unit_of_measurement=CONCENTRATION_PARTS_PER_MILLION,
+            native_unit_of_measurement=PARTS_PER_MILLION,
             ccb_sensor=EXTRA_SENSORS.get(SENSOR_CO2_ZONE_BASE + zone),
             entity_registry_enabled_default=False,
             throttle=True,

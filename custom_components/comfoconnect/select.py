@@ -32,6 +32,7 @@ from aiocomfoconnect.sensors import Sensor as AioComfoConnectSensor
 from homeassistant.components.select import SelectEntity, SelectEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -293,6 +294,11 @@ class ComfoConnectSelect(SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         """Set the selected option."""
-        await self.entity_description.set_value_fn(self._ccb, option)
+        try:
+            await self.entity_description.set_value_fn(self._ccb, option)
+        except (AioComfoConnectNotConnected, AioComfoConnectTimeout) as err:
+            raise HomeAssistantError(f"Not connected to ComfoConnect bridge: {err}") from err
+        except ComfoConnectError as err:
+            raise HomeAssistantError(f"Failed to set {self.entity_description.name}: {err}") from err
         self._attr_current_option = option
         self.schedule_update_ha_state()
