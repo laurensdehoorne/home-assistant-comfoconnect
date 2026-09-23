@@ -8,14 +8,20 @@ from typing import Any
 import aiocomfoconnect
 import voluptuous as vol
 from aiocomfoconnect import Bridge
-from aiocomfoconnect.exceptions import ComfoConnectNotAllowed
+from aiocomfoconnect.exceptions import (
+    AioComfoConnectNotConnected,
+    AioComfoConnectTimeout,
+    ComfoConnectError,
+    ComfoConnectNotAllowed,
+)
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_PIN
+from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util.uuid import random_uuid_hex
 
-from .const import CONF_LOCAL_UUID, CONF_UUID, DOMAIN
+from .const import CONF_INSTALLER_PIN, CONF_LOCAL_UUID, CONF_UUID, DOMAIN
 
 DEFAULT_PIN = "0000"
 COMFOCONNECT_MANUAL_BRIDGE_ID = "manual"
@@ -26,6 +32,12 @@ class ComfoConnectConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a ComfoConnect config flow."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> ComfoConnectOptionsFlow:
+        """Get the options flow for this handler."""
+        return ComfoConnectOptionsFlow()
 
     def __init__(self) -> None:
         """Initialize the Hue flow."""
@@ -105,6 +117,31 @@ class ComfoConnectConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({vol.Required(CONF_HOST): str}),
         )
 
+    async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Change the address of the bridge, e.g. when its IP address changed."""
+        entry = self._get_reconfigure_entry()
+        errors = {}
+        if user_input is not None:
+            host = user_input[CONF_HOST].strip()
+            bridges = await aiocomfoconnect.discover_bridges(host)
+            if not bridges:
+                errors["base"] = "invalid_host"
+            elif bridges[0].uuid != entry.data[CONF_UUID]:
+                # A different bridge: that needs a new config entry (and registration).
+                errors["base"] = "wrong_bridge"
+            else:
+                return self.async_update_reload_and_abort(
+                    entry,
+                    title=bridges[0].host,
+                    data_updates={CONF_HOST: bridges[0].host},
+                )
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            errors=errors,
+            data_schema=vol.Schema({vol.Required(CONF_HOST, default=entry.data[CONF_HOST]): str}),
+        )
+
     async def _register(self, pin: int = None) -> FlowResult:
         """Register on the bridge."""
 
@@ -169,6 +206,48 @@ class ComfoConnectConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         vol.Coerce(int),
                         vol.Range(min=0, max=9999, msg="A PIN must be between 0000 and 9999"),
                     )
+                }
+            ),
+        )
+
+
+class ComfoConnectOptionsFlow(config_entries.OptionsFlow):
+    """
+    Handle the options of a ComfoConnect bridge.
+
+    The installer PIN unlocks the installer settings (like the airflow per
+    preset), as in the installer menu of the ComfoControl app. Like the app,
+    we check it against the installer PIN of the unit.
+    """
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Manage the options."""
+        errors = {}
+        if user_input is not None:
+            pin = (user_input.get(CONF_INSTALLER_PIN) or "").strip()
+            if not pin:
+                return self.async_create_entry(data={})
+
+            bridge = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+            if bridge is None:
+                errors["base"] = "cannot_connect"
+            else:
+                try:
+                    if await bridge.check_installer_pin(pin):
+                        return self.async_create_entry(data={CONF_INSTALLER_PIN: pin.zfill(4)})
+                    errors[CONF_INSTALLER_PIN] = "invalid_installer_pin"
+                except (AioComfoConnectNotConnected, AioComfoConnectTimeout, ComfoConnectError):
+                    errors["base"] = "cannot_connect"
+
+        return self.async_show_form(
+            step_id="init",
+            errors=errors,
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_INSTALLER_PIN,
+                        description={"suggested_value": self.config_entry.options.get(CONF_INSTALLER_PIN, "")},
+                    ): vol.All(str, vol.Match(r"^\s*\d{0,4}\s*$")),
                 }
             ),
         )

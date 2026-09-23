@@ -96,3 +96,36 @@ FLOW_UNITS = {
 # season while the RMOT is above the cooling limit.
 PROPERTY_RMOT_LIMIT_HEATING = 2
 PROPERTY_RMOT_LIMIT_COOLING = 3
+
+# FILTER (unit 0x1C) RMI methods, as used by the filter wizard of the app.
+FILTER_BEGIN_REPLACEMENT = 0x80
+FILTER_END_REPLACEMENT = 0x81
+FILTER_ABORT_REPLACEMENT = 0x82
+
+# FILTER property filterLifeDays (UINT16), with the choices the app offers.
+PROPERTY_FILTER_LIFE_DAYS = 2
+FILTER_LIFE_DAYS_MIN = 60
+FILTER_LIFE_DAYS_MAX = 180
+FILTER_LIFE_DAYS_STEP = 10
+
+# TEMPHUMCONTROL property temperaturePassivePreset (firmware R1.9.0 and newer):
+# how fast the unit reacts to favourable conditions for passive heating/cooling.
+PROPERTY_TEMPERATURE_PASSIVE_PRESET = 14
+TEMPERATURE_PASSIVE_PRESETS = {
+    0: "slow",
+    1: "medium",
+    2: "fast",
+}
+
+# NODECONFIGURATION property installerPinCode (a 4 digit string). The unit
+# doesn't check it: the app reads it and compares it with the PIN you enter.
+PROPERTY_INSTALLER_PIN = 3
+
+# VENTILATIONCONFIG properties preset0Flow..preset3Flow (UINT16): the airflow
+# of the away / low / medium / high preset. Installer menu only in the app.
+PROPERTY_PRESET_FLOWS = {
+    "away": 3,
+    "low": 4,
+    "medium": 5,
+    "high": 6,
+}

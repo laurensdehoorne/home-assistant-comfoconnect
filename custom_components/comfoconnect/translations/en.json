@@ -2,14 +2,16 @@
     "config": {
         "abort": {
             "no_devices_found": "No devices found on the network",
-            "reauth_successful": "Re-authentication was successful"
+            "reauth_successful": "Re-authentication was successful",
+            "reconfigure_successful": "Re-configuration was successful"
         },
         "create_entry": {
             "default": "Some sensors are not enabled by default. You can enable them in the entity registry after the integration configuration."
         },
         "error": {
             "invalid_pin": "Invalid PIN",
-            "invalid_host": "Could not find a ComfoConnect bridge at this address"
+            "invalid_host": "Could not find a ComfoConnect bridge at this address",
+            "wrong_bridge": "This is a different ComfoConnect bridge. Add it as a new integration instead."
         },
         "step": {
             "confirm": {
@@ -32,6 +34,13 @@
                 },
                 "description": "Select the ComfoConnect LAN C bridge from the list below.",
                 "title": "Add a ComfoConnect LAN C bridge"
+            },
+            "reconfigure": {
+                "title": "Reconfigure the ComfoConnect LAN C bridge",
+                "description": "Enter the new hostname or IP address of the bridge, for example after its IP address changed.",
+                "data": {
+                    "host": "Host"
+                }
             }
         }
     },
@@ -101,6 +110,21 @@
                     "overruling": "Overruling"
                 }
             }
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "ComfoConnect options",
+                "description": "Enter the installer PIN of the ventilation unit to show the installer settings (like the airflow per preset), as in the installer menu of the ComfoControl app. Leave it empty to hide them. Changing installer settings can affect how the unit ventilates your home.",
+                "data": {
+                    "installer_pin": "Installer PIN"
+                }
+            }
+        },
+        "error": {
+            "invalid_installer_pin": "This is not the installer PIN of the unit",
+            "cannot_connect": "Could not reach the ComfoConnect bridge"
         }
     }
 }

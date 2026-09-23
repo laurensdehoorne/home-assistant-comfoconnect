@@ -4,3 +4,4 @@ DOMAIN = "comfoconnect"
 
 CONF_LOCAL_UUID = "local_uuid"
 CONF_UUID = "uuid"
+CONF_INSTALLER_PIN = "installer_pin"

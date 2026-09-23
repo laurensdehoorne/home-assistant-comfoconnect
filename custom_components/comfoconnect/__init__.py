@@ -13,7 +13,17 @@ from datetime import timedelta
 from aiocomfoconnect import ComfoConnect, discover_bridges
 from aiocomfoconnect import bridge as aiocomfoconnect_bridge
 from aiocomfoconnect.bridge import EventBus, Message
-from aiocomfoconnect.const import SUBUNIT_01, SUBUNIT_05, UNIT_SCHEDULE, UNIT_TEMPHUMCONTROL, ComfoCoolMode, PdoType
+from aiocomfoconnect.const import (
+    SUBUNIT_01,
+    SUBUNIT_05,
+    UNIT_FILTER,
+    UNIT_NODECONFIGURATION,
+    UNIT_SCHEDULE,
+    UNIT_TEMPHUMCONTROL,
+    UNIT_VENTILATIONCONFIG,
+    ComfoCoolMode,
+    PdoType,
+)
 from aiocomfoconnect.exceptions import (
     AioComfoConnectNotConnected,
     AioComfoConnectTimeout,
@@ -41,7 +51,8 @@ from homeassistant.helpers.dispatcher import dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 
-from .const import CONF_LOCAL_UUID, CONF_UUID, DOMAIN
+from .const import CONF_INSTALLER_PIN, CONF_LOCAL_UUID, CONF_UUID, DOMAIN
+from .pdo import PROPERTY_FILTER_LIFE_DAYS, PROPERTY_INSTALLER_PIN, PROPERTY_TEMPERATURE_PASSIVE_PRESET
 
 PLATFORMS: list[Platform] = [
     Platform.FAN,
@@ -176,7 +187,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         via_device_id=bridge_device.id,
     )
 
+    # Installer settings are only offered when the installer PIN is configured
+    # and matches the PIN of the unit (like the installer menu of the app).
+    if pin := entry.options.get(CONF_INSTALLER_PIN):
+        try:
+            bridge.installer_mode = await bridge.check_installer_pin(pin)
+        except (AioComfoConnectNotConnected, AioComfoConnectTimeout, ComfoConnectError) as err:
+            _LOGGER.warning("Could not check the installer PIN, installer settings are not available: %s", err)
+        else:
+            if not bridge.installer_mode:
+                _LOGGER.warning("The configured installer PIN is not correct, installer settings are not available.")
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Reload when the options (installer PIN) change.
+    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
     async def send_keepalive(now) -> None:
         """
@@ -218,6 +243,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload the config entry after its options changed."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
@@ -229,8 +259,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 @dataclass
-class RmotLimit:
-    """An RMOT limit of the season detection, with its allowed range (in °C)."""
+class PropertyRange:
+    """A numeric property of the unit, with its allowed range and step."""
 
     value: float
     minimum: float
@@ -276,6 +306,8 @@ class ComfoConnectBridge(ComfoConnect):
         self._read_task: asyncio.Task | None = None
         self._last_received = 0.0
         self._session_refused = False
+        # Whether installer settings are available (see CONF_INSTALLER_PIN).
+        self.installer_mode = False
 
     async def connect(self, uuid: str) -> None:
         """
@@ -551,19 +583,58 @@ class ComfoConnectBridge(ComfoConnect):
             return
         await super().set_comfocool_mode(mode, timeout)
 
-    async def get_rmot_limit(self, property_id: int) -> RmotLimit:
-        """Read an RMOT limit of the season detection, with its range and step."""
-        # 0x70 = actual value | range | step, each an INT16 in 0.1 °C.
-        result = await self.cmd_rmi_request(bytes([0x01, UNIT_TEMPHUMCONTROL, SUBUNIT_01, 0x70, property_id]))
+    async def get_property_range(self, unit: int, property_id: int, *, signed: bool = False, scale: int = 1) -> PropertyRange:
+        """Read a 16 bit property with its allowed range and step."""
+        # 0x70 = actual value | range | step, like the app requests them.
+        result = await self.cmd_rmi_request(bytes([0x01, unit, SUBUNIT_01, 0x70, property_id]))
         if len(result.message) < 8:
-            raise ComfoConnectError(f"Unexpected response for RMOT limit {property_id}: {result.message.hex()}")
-        value, minimum, maximum, step = struct.unpack("<hhhh", result.message[:8])
-        return RmotLimit(value / 10, minimum / 10, maximum / 10, step / 10)
+            raise ComfoConnectError(f"Unexpected response for property {unit}/{property_id}: {result.message.hex()}")
+        values = struct.unpack("<hhhh" if signed else "<HHHH", result.message[:8])
+        return PropertyRange(*(value / scale for value in values))
+
+    async def get_rmot_limit(self, property_id: int) -> PropertyRange:
+        """Read an RMOT limit of the season detection (INT16 in 0.1 °C), with its range and step."""
+        return await self.get_property_range(UNIT_TEMPHUMCONTROL, property_id, signed=True, scale=10)
 
     async def set_rmot_limit(self, property_id: int, value: float) -> None:
         """Set an RMOT limit of the season detection (in °C)."""
         await self.set_property_typed(UNIT_TEMPHUMCONTROL, SUBUNIT_01, property_id, round(value * 10), PdoType.TYPE_CN_INT16)
         dispatcher_send(self.hass, SIGNAL_COMFOCONNECT_RMOT_LIMIT.format(self.uuid, property_id), value)
+
+    async def get_filter_life_days(self) -> PropertyRange:
+        """Read after how many days the filters should be replaced."""
+        return await self.get_property_range(UNIT_FILTER, PROPERTY_FILTER_LIFE_DAYS)
+
+    async def set_filter_life_days(self, days: float) -> None:
+        """Set after how many days the filters should be replaced."""
+        await self.set_property_typed(UNIT_FILTER, SUBUNIT_01, PROPERTY_FILTER_LIFE_DAYS, int(days), PdoType.TYPE_CN_UINT16)
+
+    async def filter_replacement(self, method: int) -> None:
+        """Begin, end or abort the filter replacement (the filter wizard of the app)."""
+        await self.cmd_rmi_request(bytes([method, UNIT_FILTER, SUBUNIT_01]))
+
+    async def get_temperature_passive_preset(self) -> int:
+        """Read how fast the unit reacts to favourable passive heating/cooling conditions."""
+        return await self.get_single_property(UNIT_TEMPHUMCONTROL, SUBUNIT_01, PROPERTY_TEMPERATURE_PASSIVE_PRESET, PdoType.TYPE_CN_UINT8)
+
+    async def set_temperature_passive_preset(self, value: int) -> None:
+        """Set how fast the unit reacts to favourable passive heating/cooling conditions."""
+        await self.set_property(UNIT_TEMPHUMCONTROL, SUBUNIT_01, PROPERTY_TEMPERATURE_PASSIVE_PRESET, value)
+
+    async def get_preset_flow(self, property_id: int) -> PropertyRange:
+        """Read the airflow of a ventilation preset, with its allowed range."""
+        return await self.get_property_range(UNIT_VENTILATIONCONFIG, property_id)
+
+    async def set_preset_flow(self, property_id: int, flow: float) -> None:
+        """Set the airflow of a ventilation preset (installer setting)."""
+        if not self.installer_mode:
+            raise ComfoConnectError("Installer settings require the installer PIN")
+        await self.set_property_typed(UNIT_VENTILATIONCONFIG, SUBUNIT_01, property_id, int(flow), PdoType.TYPE_CN_UINT16)
+
+    async def check_installer_pin(self, pin: str) -> bool:
+        """Return whether the PIN matches the installer PIN of the unit."""
+        unit_pin = await self.get_single_property(UNIT_NODECONFIGURATION, SUBUNIT_01, PROPERTY_INSTALLER_PIN, PdoType.TYPE_CN_STRING)
+        return str(pin).strip().zfill(4) == str(unit_pin).strip()
 
     async def start_season_now(self, property_id: int) -> float:
         """

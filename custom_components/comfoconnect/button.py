@@ -21,7 +21,13 @@ from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import DOMAIN, ComfoConnectBridge
-from .pdo import PROPERTY_RMOT_LIMIT_COOLING, PROPERTY_RMOT_LIMIT_HEATING
+from .pdo import (
+    FILTER_ABORT_REPLACEMENT,
+    FILTER_BEGIN_REPLACEMENT,
+    FILTER_END_REPLACEMENT,
+    PROPERTY_RMOT_LIMIT_COOLING,
+    PROPERTY_RMOT_LIMIT_HEATING,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,6 +69,29 @@ BUTTON_TYPES = (
         icon="mdi:snowflake",
         entity_category=EntityCategory.CONFIG,
         needs_rmot=True,
+    ),
+    # The filter wizard of the app: start it, replace the filters, then finish
+    # it (which resets the filter counter) or cancel it.
+    ComfoconnectButtonEntityDescription(
+        key="filter_replacement_start",
+        press_fn=lambda ccb, option: cast(Coroutine, ccb.filter_replacement(FILTER_BEGIN_REPLACEMENT)),
+        name="Start filter replacement",
+        icon="mdi:air-filter",
+        entity_category=EntityCategory.CONFIG,
+    ),
+    ComfoconnectButtonEntityDescription(
+        key="filter_replacement_finish",
+        press_fn=lambda ccb, option: cast(Coroutine, ccb.filter_replacement(FILTER_END_REPLACEMENT)),
+        name="Finish filter replacement",
+        icon="mdi:check",
+        entity_category=EntityCategory.CONFIG,
+    ),
+    ComfoconnectButtonEntityDescription(
+        key="filter_replacement_cancel",
+        press_fn=lambda ccb, option: cast(Coroutine, ccb.filter_replacement(FILTER_ABORT_REPLACEMENT)),
+        name="Cancel filter replacement",
+        icon="mdi:close",
+        entity_category=EntityCategory.CONFIG,
     ),
 )
 

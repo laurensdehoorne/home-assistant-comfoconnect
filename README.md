@@ -18,7 +18,10 @@ A custom integration for Home Assistant to control and monitor a Zehnder ComfoAi
 * Boost (10 – 60 minutes, or off)
 * Bypass mode, balance mode, temperature profile and ComfoCool mode
 * Season detection: heating and cooling season RMOT limits, and "start heating/cooling season now" buttons
+* Sensor ventilation: temperature passive (and its reaction speed), humidity comfort and humidity protection
+* Filter replacement (start / finish / cancel, like the filter wizard of the app) and the filter replacement interval
 * Clear the errors of the unit
+* Installer settings, when the installer PIN is configured (see [Installer settings](#installer-settings)): the airflow of each preset
 
 ### Sensors
 
@@ -35,7 +38,7 @@ A custom integration for Home Assistant to control and monitor a Zehnder ComfoAi
 
 ### Behaviour
 
-* Configurable through the UI, with support for multiple bridges
+* Configurable through the UI, with support for multiple bridges; the address of a bridge can be changed with "Reconfigure"
 * Changes to the fan speed won't be reverted after 2 hours
 * Ignores the invalid sensor values the bridge sends at the start of a session (workaround for a bridge firmware bug)
 * Throttles high frequency sensor updates (airflow & fan duty) to once every 10 seconds
@@ -72,6 +75,15 @@ If you have the built-in `comfoconnect` integration configured in `configuration
 your existing sensor ids. You should also remove the old configuration from the `configuration.yaml` file.
 
 If not, you can add the integration through the UI by going to the integrations page and adding the `Zehnder ComfoAirQ` integration.
+
+## Installer settings
+
+Some settings are only available in the installer menu of the ComfoControl app. To use them in Home Assistant, open the integration, choose
+**Configure** and enter the installer PIN of the unit. The PIN is checked against the unit, like the app does. Leave it empty to hide the installer
+settings again.
+
+Currently this adds the airflow of each preset (away, low, medium and high). Changing installer settings affects how the unit ventilates your home,
+so only change them if you know what you are doing.
 
 ## Credits
 

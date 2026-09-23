@@ -38,7 +38,7 @@ from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import DOMAIN, SIGNAL_COMFOCONNECT_AVAILABLE, SIGNAL_COMFOCONNECT_UPDATE_RECEIVED, ComfoConnectBridge
-from .pdo import BOOST_TIMERS, SENSOR_COMFOCOOL_MODE, SENSOR_EXHAUST_FAN_TIMER, SENSOR_SUPPLY_FAN_TIMER
+from .pdo import BOOST_TIMERS, SENSOR_COMFOCOOL_MODE, SENSOR_EXHAUST_FAN_TIMER, SENSOR_SUPPLY_FAN_TIMER, TEMPERATURE_PASSIVE_PRESETS
 from .pdo import SENSORS as EXTRA_SENSORS
 
 _LOGGER = logging.getLogger(__name__)
@@ -71,6 +71,8 @@ class ComfoconnectSelectEntityDescription(SelectEntityDescription, ComfoconnectS
     # and returns the option, or None when the values don't map to an option.
     sensors: tuple[AioComfoConnectSensor, ...] = ()
     sensor_value_fn: Callable[[dict[int, Any]], str | None] = None
+    # Only add the entity when the unit supports it (reading it doesn't fail).
+    probe: bool = False
 
 
 async def _get_boost_option(ccb: ComfoConnectBridge) -> str | None:
@@ -93,6 +95,17 @@ def _balance_from_fan_timers(values: dict[int, Any]) -> str | None:
     if supply_off:
         return VentilationBalance.EXHAUST_ONLY
     return VentilationBalance.BALANCE
+
+
+async def _get_temperature_passive_preset(ccb: ComfoConnectBridge) -> str | None:
+    """Map the temperature passive preset (0/1/2) to a select option."""
+    return TEMPERATURE_PASSIVE_PRESETS.get(await ccb.get_temperature_passive_preset())
+
+
+async def _set_temperature_passive_preset(ccb: ComfoConnectBridge, option: str) -> None:
+    """Set the temperature passive preset from a select option."""
+    value = next(value for value, name in TEMPERATURE_PASSIVE_PRESETS.items() if name == option)
+    await ccb.set_temperature_passive_preset(value)
 
 
 async def _get_comfocool_option(ccb: ComfoConnectBridge) -> str:
@@ -176,6 +189,44 @@ SELECT_TYPES = (
         sensors=(SENSORS.get(SENSOR_OPERATING_MODE_2),),
         sensor_value_fn=lambda values: None if values[SENSOR_OPERATING_MODE_2] in BOOST_TIMERS else "Off",
     ),
+    ComfoconnectSelectEntityDescription(
+        key="sensor_ventilation_temperature_passive",
+        name="Sensor ventilation temperature passive",
+        icon="mdi:thermometer-auto",
+        entity_category=EntityCategory.CONFIG,
+        get_value_fn=lambda ccb: cast(Coroutine, ccb.get_sensor_ventmode_temperature_passive()),
+        set_value_fn=lambda ccb, option: cast(Coroutine, ccb.set_sensor_ventmode_temperature_passive(option)),
+        options=[VentilationSetting.AUTO, VentilationSetting.ON, VentilationSetting.OFF],
+    ),
+    ComfoconnectSelectEntityDescription(
+        key="sensor_ventilation_temperature_passive_preset",
+        name="Sensor ventilation temperature passive reaction",
+        icon="mdi:speedometer",
+        entity_category=EntityCategory.CONFIG,
+        get_value_fn=_get_temperature_passive_preset,
+        set_value_fn=_set_temperature_passive_preset,
+        options=list(TEMPERATURE_PASSIVE_PRESETS.values()),
+        # Firmware R1.9.0 and newer.
+        probe=True,
+    ),
+    ComfoconnectSelectEntityDescription(
+        key="sensor_ventilation_humidity_comfort",
+        name="Sensor ventilation humidity comfort",
+        icon="mdi:water-percent",
+        entity_category=EntityCategory.CONFIG,
+        get_value_fn=lambda ccb: cast(Coroutine, ccb.get_sensor_ventmode_humidity_comfort()),
+        set_value_fn=lambda ccb, option: cast(Coroutine, ccb.set_sensor_ventmode_humidity_comfort(option)),
+        options=[VentilationSetting.AUTO, VentilationSetting.ON, VentilationSetting.OFF],
+    ),
+    ComfoconnectSelectEntityDescription(
+        key="sensor_ventilation_humidity_protection",
+        name="Sensor ventilation humidity protection",
+        icon="mdi:water-alert",
+        entity_category=EntityCategory.CONFIG,
+        get_value_fn=lambda ccb: cast(Coroutine, ccb.get_sensor_ventmode_humidity_protection()),
+        set_value_fn=lambda ccb, option: cast(Coroutine, ccb.set_sensor_ventmode_humidity_protection(option)),
+        options=[VentilationSetting.AUTO, VentilationSetting.ON, VentilationSetting.OFF],
+    ),
 )
 
 
@@ -187,7 +238,18 @@ async def async_setup_entry(
     """Set up the ComfoConnect selects."""
     ccb = hass.data[DOMAIN][config_entry.entry_id]
 
-    selects = [ComfoConnectSelect(ccb=ccb, config_entry=config_entry, description=description) for description in SELECT_TYPES]
+    selects = []
+    for description in SELECT_TYPES:
+        if description.probe:
+            try:
+                await description.get_value_fn(ccb)
+            except ComfoConnectError as err:
+                _LOGGER.debug("The unit doesn't support %s: %s", description.key, err)
+                continue
+            except (AioComfoConnectNotConnected, AioComfoConnectTimeout):
+                # Can't tell now; add it and let it become unavailable if unsupported.
+                pass
+        selects.append(ComfoConnectSelect(ccb=ccb, config_entry=config_entry, description=description))
 
     async_add_entities(selects, True)
 
@@ -269,7 +331,7 @@ class ComfoConnectSelect(SelectEntity):
         """Update the state."""
         try:
             value = await self.entity_description.get_value_fn(self._ccb)
-        except (AioComfoConnectTimeout, AioComfoConnectNotConnected, ComfoConnectError, AttributeError) as err:
+        except (AioComfoConnectTimeout, AioComfoConnectNotConnected, ComfoConnectError, AttributeError, ValueError) as err:
             # Bridge did not (properly) answer the polled RMI request. Tolerate a
             # few transient failures (keeping the last value), but mark the entity
             # unavailable once they persist.
