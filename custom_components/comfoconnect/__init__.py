@@ -12,7 +12,7 @@ from datetime import timedelta
 
 from aiocomfoconnect import ComfoConnect, discover_bridges
 from aiocomfoconnect import bridge as aiocomfoconnect_bridge
-from aiocomfoconnect.bridge import EventBus, Message
+from aiocomfoconnect.bridge import Bridge, Message
 from aiocomfoconnect.const import (
     SUBUNIT_01,
     SUBUNIT_05,
@@ -26,9 +26,11 @@ from aiocomfoconnect.const import (
 )
 from aiocomfoconnect.exceptions import (
     AioComfoConnectNotConnected,
+    AioComfoConnectNotReachable,
     AioComfoConnectTimeout,
     ComfoConnectError,
     ComfoConnectNotAllowed,
+    VentilationUnitNotFoundException,
 )
 from aiocomfoconnect.properties import (
     PROPERTY_FIRMWARE_VERSION,
@@ -268,27 +270,6 @@ class PropertyRange:
     step: float
 
 
-class SafeEventBus(EventBus):
-    """
-    An event bus that tolerates replies we are no longer waiting for.
-
-    The library deletes the listeners of a reference right after emitting, so a
-    late or duplicate reply for a reference that has no listeners left raises a
-    KeyError. That exception escapes the read loop and kills the reconnect loop,
-    leaving the integration offline until Home Assistant is restarted.
-    """
-
-    def emit(self, event_name, event):
-        """Emit an event to the event bus."""
-        for future in self.listeners.pop(event_name, ()):
-            if future.done():
-                continue
-            if isinstance(event, Exception):
-                future.set_exception(event)
-            else:
-                future.set_result(event)
-
-
 class ComfoConnectBridge(ComfoConnect):
     """Representation of a ComfoConnect bridge."""
 
@@ -297,6 +278,7 @@ class ComfoConnectBridge(ComfoConnect):
         super().__init__(
             host,
             uuid,
+            loop=hass.loop,
             sensor_callback=self.sensor_callback,
             alarm_callback=self.alarm_callback,
         )
@@ -346,17 +328,20 @@ class ComfoConnectBridge(ComfoConnect):
         try:
             while not self._closing:
                 try:
-                    self._read_task = await self._connect(uuid)
+                    await self._open_connection(uuid)
+                    read_task = self._read_task
                     await self.cmd_start_session(True)
                     self._session_refused = False
 
+                    # RMI requests go to the node of the ventilation unit, which
+                    # the bridge announces after the session starts.
+                    await self.cmd_node_request()
+                    await self.wait_for_ventilation_node()
+
                     # Buffer the sensor values for a moment: the bridge sends
                     # invalid values right after connecting (see aiocomfoconnect).
-                    if self.sensor_delay:
-                        if self._sensor_hold is not None:
-                            self._sensor_hold.cancel()
-                        self._sensors_values = {}
-                        self._sensor_hold = self._loop.call_later(self.sensor_delay, self._unhold_sensors)
+                    for sensor_id in self._sensors:
+                        self._hold_sensor(sensor_id)
 
                     # Register the sensors (again, when we lost the connection).
                     for sensor in list(self._sensors.values()):
@@ -366,7 +351,7 @@ class ComfoConnectBridge(ComfoConnect):
                         connected.set_result(True)
 
                     # Wait until the connection is lost (or we are closing).
-                    await self._read_task
+                    await read_task
 
                 except ComfoConnectNotAllowed as err:
                     if not connected.done():
@@ -378,7 +363,14 @@ class ComfoConnectBridge(ComfoConnect):
                     log("The bridge refused the session, retrying every %d seconds: %s", RECONNECT_DELAY, err)
                     self._session_refused = True
 
-                except (AioComfoConnectNotConnected, AioComfoConnectTimeout, ComfoConnectError, OSError) as err:
+                except (
+                    AioComfoConnectNotConnected,
+                    AioComfoConnectNotReachable,
+                    AioComfoConnectTimeout,
+                    ComfoConnectError,
+                    VentilationUnitNotFoundException,
+                    OSError,
+                ) as err:
                     _LOGGER.info("The connection to the bridge was lost or could not be made, retrying in %d seconds: %r", RECONNECT_DELAY, err)
 
                 except Exception:
@@ -402,7 +394,7 @@ class ComfoConnectBridge(ComfoConnect):
             except (asyncio.CancelledError, Exception) as err:
                 # Only retrieve the result, so it isn't reported as never retrieved.
                 _LOGGER.debug("The read task ended with: %r", err)
-        await self._disconnect()
+        await self._close_socket()
 
     @callback
     def _reconnect_task_done(self, task: asyncio.Task) -> None:
@@ -421,6 +413,9 @@ class ComfoConnectBridge(ComfoConnect):
         by the season buttons), and it doesn't fail while the connection is
         down: the reconnect loop registers all sensors when it reconnects.
         """
+        if sensor.id not in self._sensors:
+            # The bridge sends invalid values right after we subscribe.
+            self._hold_sensor(sensor.id)
         self._sensors[sensor.id] = sensor
         self._sensors_values.setdefault(sensor.id, None)
         try:
@@ -437,7 +432,7 @@ class ComfoConnectBridge(ComfoConnect):
             return
         super()._sensor_callback(sensor_id, sensor_value)
 
-    async def _send(self, request, request_type, params: dict | None = None, reply: bool = True):
+    async def _send(self, request, request_type, params: dict | None = None, reply: bool = True, timeout: float | None = None):
         """
         Send a command and wait for its reply.
 
@@ -454,8 +449,7 @@ class ComfoConnectBridge(ComfoConnect):
         if not self.is_connected():
             raise AioComfoConnectNotConnected
 
-        reference = self._reference
-        self._reference += 1
+        reference = next(self._reference)
 
         cmd = zehnder_pb2.GatewayOperation()
         cmd.type = request_type
@@ -476,35 +470,37 @@ class ComfoConnectBridge(ComfoConnect):
             fut.set_result(None)
 
         _LOGGER.debug("TX %s", message)
-        self._writer.write(message.encode())
-        await self._writer.drain()
+        try:
+            self._writer.write(message.encode())
+            await self._writer.drain()
+        except OSError as exc:
+            if reply:
+                self._event_bus.emit(reference, AioComfoConnectNotConnected("Connection lost while sending"))
+            raise AioComfoConnectNotConnected("Connection lost while sending") from exc
 
-        timeout = aiocomfoconnect_bridge.TIMEOUT
+        if timeout is None:
+            timeout = aiocomfoconnect_bridge.TIMEOUT
         try:
             return await asyncio.wait_for(fut, timeout)
         except TimeoutError as exc:
             if self._loop.time() - self._last_received >= timeout:
                 _LOGGER.warning("The bridge did not send anything for %d seconds, reconnecting.", timeout)
-                await self._disconnect()
+                # Closing the socket ends the read task, the reconnect loop takes it from there.
+                self._writer.close()
             else:
                 _LOGGER.debug("No reply from the bridge to request %d (type %d)", reference, request_type)
             raise AioComfoConnectTimeout("Timeout while waiting for response from bridge") from exc
 
-    async def _connect(self, uuid: str):
-        """Connect to the bridge, using an event bus that survives stray replies."""
-        read_task = await super()._connect(uuid)
-
-        # The event bus is created (empty) by the connect above; replace it
-        # before the read task gets a chance to process a message.
-        self._event_bus = SafeEventBus()
+    async def _open_connection(self, uuid: str):
+        """Open the connection to the bridge."""
+        await super()._open_connection(uuid)
         self._last_received = self._loop.time()
 
-        return read_task
-
-    async def _disconnect(self):
-        """Disconnect from the bridge, ignoring an already broken connection."""
+    async def _close_socket(self):
+        """Close the connection to the bridge, ignoring an already broken connection."""
         try:
-            await super()._disconnect()
+            # Bridge.disconnect, since ComfoConnect.disconnect also stops its own reconnect loop.
+            await Bridge.disconnect(self)
         except OSError as err:
             # E.g. ConnectionResetError while flushing the socket on shutdown.
             _LOGGER.debug("Error while closing the connection to the bridge: %s", err)
@@ -513,21 +509,16 @@ class ComfoConnectBridge(ComfoConnect):
         """
         Process a message from the bridge without killing the read loop.
 
-        The library only translates an incomplete read into a disconnect. Any
-        other error escapes the read loop and terminates the reconnect loop with
-        it, so we handle those here: signal a disconnect when the connection is
-        gone (the reconnect loop then reconnects), and otherwise keep reading.
+        The library translates a lost connection into a disconnect. Any other
+        error (e.g. in a callback) escapes the read loop and drops the connection
+        with it, so we handle those here: signal a disconnect when the connection
+        is gone (the reconnect loop then reconnects), and otherwise keep reading.
         """
         try:
             await super()._process_message()
             self._last_received = self._loop.time()
         except AioComfoConnectNotConnected:
             raise
-        except OSError as err:
-            # E.g. ConnectionResetError: the bridge dropped the connection.
-            _LOGGER.info("The connection to the bridge was lost: %s", err)
-            await self._disconnect()
-            raise AioComfoConnectNotConnected("The connection was closed.") from err
         except Exception as err:
             _LOGGER.exception("Unexpected error while processing a message from the bridge")
             if self.is_connected():

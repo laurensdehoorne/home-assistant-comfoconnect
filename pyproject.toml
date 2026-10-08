@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "home-assistant-comfoconnect"
-version = "0.7.1"
+version = "0.8.0"
 description = "Home Assistant Zehnder ComfoAirQ integration"
 authors = ["laurensdehoorne <55842703+laurensdehoorne@users.noreply.github.com>", "Michaël Arnauts <michael.arnauts@gmail.com>"]
 readme = "README.md"
@@ -8,7 +8,7 @@ packages = [{include = "custom_components/comfoconnect"}]
 
 [tool.poetry.dependencies]
 python = ">=3.12,<3.13"
-aiocomfoconnect = "0.1.15"
+aiocomfoconnect = "0.2.1"
 
 [tool.poetry.group.dev.dependencies]
 homeassistant = "^2024.11.0b1"
