@@ -1,8 +1,7 @@
-"""Fan for the ComfoConnect integration with Manual → Auto fix."""
+"""Fan for the ComfoConnect integration."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -19,7 +18,7 @@ from aiocomfoconnect.sensors import (
 )
 from homeassistant.components.fan import FanEntity, FanEntityFeature
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
@@ -55,8 +54,8 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the ComfoConnect fan."""
-    ccb = hass.data[DOMAIN][config_entry.entry_id]
-    async_add_entities([ComfoConnectFan(ccb=ccb, config_entry=config_entry)], True)
+    ccb = config_entry.runtime_data
+    async_add_entities([ComfoConnectFan(ccb=ccb, config_entry=config_entry)])
 
 
 class ComfoConnectFan(FanEntity):
@@ -77,11 +76,9 @@ class ComfoConnectFan(FanEntity):
         self._attr_unique_id = self._ccb.uuid
         self._attr_preset_mode = None
         self._attr_percentage = 0
+        # Only link to the device: its name, model and firmware are read from the unit in __init__.
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._ccb.uuid)},
-            manufacturer="ComfoConnect",
-            model="ComfoAir Q",
-            name="ComfoAir Q Fan",
         )
 
     async def async_added_to_hass(self) -> None:
@@ -111,11 +108,16 @@ class ComfoConnectFan(FanEntity):
         )
         await self._ccb.register_sensor(SENSORS.get(SENSOR_OPERATING_MODE))
 
+        # Read the mode in the background, so the setup doesn't wait for the bridge.
+        self.async_schedule_update_ha_state(True)
+
+    @callback
     def _handle_availability_update(self, available: bool) -> None:
         """Handle availability updates."""
         self._attr_available = available
-        self.schedule_update_ha_state()
+        self.async_write_ha_state()
 
+    @callback
     def _handle_speed_update(self, value: int) -> None:
         """Handle update callbacks."""
         speed = FAN_SPEED_MAPPING.get(value, VentilationSpeed.LOW)
@@ -124,8 +126,9 @@ class ComfoConnectFan(FanEntity):
         else:
             self._attr_percentage = ordered_list_item_to_percentage(FAN_SPEEDS, speed)
 
-        self.schedule_update_ha_state()
+        self.async_write_ha_state()
 
+    @callback
     def _handle_mode_update(self, value: int) -> None:
         """Handle update callbacks."""
         mode = MODE_MAPPING.get(value)
@@ -135,11 +138,11 @@ class ComfoConnectFan(FanEntity):
             _LOGGER.debug("Ignoring unknown operating mode value: %s", value)
             return
         self._attr_preset_mode = mode
-        self.schedule_update_ha_state()
+        self.async_write_ha_state()
 
     async def async_update(self) -> None:
         """
-        Read the authoritative mode once at startup (update_before_add).
+        Read the authoritative mode once at startup.
 
         The operating-mode PDO is only pushed on change, so without this the
         preset would stay None/stale after a restart until the next push.
@@ -163,21 +166,18 @@ class ComfoConnectFan(FanEntity):
         preset_mode: str | None = None,
         **kwargs: Any,
     ) -> None:
-        """Turn on the fan, ensuring it correctly goes to AUTO mode."""
-        if not self.is_on:
-            if percentage is None:
-                percentage = ordered_list_item_to_percentage(FAN_SPEEDS, VentilationSpeed.LOW)
-            await self.async_set_percentage(percentage)
+        """
+        Turn on the fan.
 
-            # Two-step switch forces the unit into AUTO: Manual → Auto
-            await self.async_set_preset_mode(VentilationMode.MANUAL)
-            await asyncio.sleep(0.5)
-            await self.async_set_preset_mode(VentilationMode.AUTO)
-        else:
-            if preset_mode:
-                await self.async_set_preset_mode(preset_mode)
-            if percentage is not None:
-                await self.async_set_percentage(percentage)
+        Without a preset mode or a speed, this returns the unit to AUTO, which
+        also cancels the away (off) speed, so the unit follows its schedule.
+        """
+        if preset_mode is None and percentage is None:
+            preset_mode = VentilationMode.AUTO if not self.is_on else None
+        if preset_mode:
+            await self.async_set_preset_mode(preset_mode)
+        if percentage is not None:
+            await self.async_set_percentage(percentage)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the fan (set to away)."""
@@ -198,8 +198,8 @@ class ComfoConnectFan(FanEntity):
             raise HomeAssistantError(f"Not connected to ComfoConnect bridge: {err}") from err
         except ComfoConnectError as err:
             raise HomeAssistantError(f"Failed to set fan speed: {err}") from err
-        self._attr_percentage = percentage
-        self.schedule_update_ha_state()
+        self._attr_percentage = 0 if speed == VentilationSpeed.AWAY else ordered_list_item_to_percentage(FAN_SPEEDS, speed)
+        self.async_write_ha_state()
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set new preset mode."""
@@ -214,4 +214,4 @@ class ComfoConnectFan(FanEntity):
         except ComfoConnectError as err:
             raise HomeAssistantError(f"Failed to set preset mode: {err}") from err
         self._attr_preset_mode = preset_mode
-        self.schedule_update_ha_state()
+        self.async_write_ha_state()

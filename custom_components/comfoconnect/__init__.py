@@ -23,6 +23,7 @@ from aiocomfoconnect.const import (
     UNIT_VENTILATIONCONFIG,
     ComfoCoolMode,
     PdoType,
+    VentilationMode,
 )
 from aiocomfoconnect.exceptions import (
     AioComfoConnectNotConnected,
@@ -49,7 +50,7 @@ from homeassistant.exceptions import (
     ConfigEntryNotReady,
 )
 from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers.dispatcher import dispatcher_send
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 
@@ -79,6 +80,7 @@ KEEP_ALIVE_INTERVAL = timedelta(seconds=10)
 # Schedule subunit and timer ids, as used by the ComfoControl app
 # (VentilationUnit.SchedulerInstances and HRUScheduleObject.*Timers).
 SUBUNIT_HOOD = 0x09
+TIMER_PRESET = 0x01
 TIMER_PRESET_BOOST = 0x06
 TIMER_PRESET_BOOST_RF = 0x07
 TIMER_PRESET_AWAY = 0x0B
@@ -108,10 +110,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Zehnder ComfoConnect from a config entry."""
+type ComfoConnectConfigEntry = ConfigEntry[ComfoConnectBridge]
 
-    hass.data.setdefault(DOMAIN, {})
+
+async def async_setup_entry(hass: HomeAssistant, entry: ComfoConnectConfigEntry) -> bool:
+    """Set up Zehnder ComfoConnect from a config entry."""
 
     try:
         bridge = ComfoConnectBridge(hass, entry.data[CONF_HOST], entry.data[CONF_UUID])
@@ -150,20 +153,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except (AioComfoConnectTimeout, ComfoConnectError) as err:
             raise ConfigEntryNotReady from err
 
-    hass.data[DOMAIN][entry.entry_id] = bridge
-
     # Get device information
     try:
         bridge_info = await bridge.cmd_version_request()
         unit_model = await bridge.get_property(PROPERTY_MODEL)
         unit_firmware = await bridge.get_property(PROPERTY_FIRMWARE_VERSION)
         unit_name = await bridge.get_property(PROPERTY_NAME)
-    except (AioComfoConnectNotConnected, AioComfoConnectTimeout) as err:
-        # Bridge connected but did not answer device-info requests in time.
+    except (AioComfoConnectNotConnected, AioComfoConnectTimeout, ComfoConnectError) as err:
+        # Bridge connected but did not answer device-info requests (in time).
         # Retry setup later instead of failing the integration outright.
         await bridge.disconnect()
-        hass.data[DOMAIN].pop(entry.entry_id)
-        raise ConfigEntryNotReady("Timeout while reading device information") from err
+        raise ConfigEntryNotReady(f"Could not read the device information: {err}") from err
+
+    entry.runtime_data = bridge
 
     device_registry = dr.async_get(hass)
 
@@ -231,7 +233,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if available == last_available:
             return
         last_available = available
-        dispatcher_send(hass, SIGNAL_COMFOCONNECT_AVAILABLE.format(bridge.uuid), available)
+        async_dispatcher_send(hass, SIGNAL_COMFOCONNECT_AVAILABLE.format(bridge.uuid), available)
 
     entry.async_on_unload(async_track_time_interval(hass, send_keepalive, KEEP_ALIVE_INTERVAL))
 
@@ -245,17 +247,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def async_reload_entry(hass: HomeAssistant, entry: ComfoConnectConfigEntry) -> None:
     """Reload the config entry after its options changed."""
     await hass.config_entries.async_reload(entry.entry_id)
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: ComfoConnectConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        bridge = hass.data[DOMAIN][entry.entry_id]
-        await bridge.disconnect()
-        hass.data[DOMAIN].pop(entry.entry_id)
+        await entry.runtime_data.disconnect()
 
     return unload_ok
 
@@ -412,15 +412,26 @@ class ComfoConnectBridge(ComfoConnect):
         sensor that is already registered (e.g. the RMOT, used by a sensor and
         by the season buttons), and it doesn't fail while the connection is
         down: the reconnect loop registers all sensors when it reconnects.
+
+        The request is sent in the background, so adding the entities (each
+        registers its sensors) doesn't wait for a reply from the bridge for
+        every sensor in turn.
         """
-        if sensor.id not in self._sensors:
-            # The bridge sends invalid values right after we subscribe.
-            self._hold_sensor(sensor.id)
+        if sensor.id in self._sensors:
+            # Already registered (e.g. the RMOT, or the flow unit of the airflow entities).
+            return
+        # The bridge sends invalid values right after we subscribe.
+        self._hold_sensor(sensor.id)
         self._sensors[sensor.id] = sensor
         self._sensors_values.setdefault(sensor.id, None)
+        if self.is_connected():
+            self.hass.async_create_background_task(self._request_sensor(sensor), f"comfoconnect register sensor {sensor.id}")
+
+    async def _request_sensor(self, sensor: Sensor) -> None:
+        """Ask the bridge to send the updates of a sensor."""
         try:
             await self.cmd_rpdo_request(sensor.id, sensor.type)
-        except (AioComfoConnectNotConnected, AioComfoConnectTimeout) as err:
+        except (AioComfoConnectNotConnected, AioComfoConnectTimeout, ComfoConnectError) as err:
             _LOGGER.debug("Sensor %d will be registered when the connection is back: %r", sensor.id, err)
 
     def _sensor_callback(self, sensor_id, sensor_value):
@@ -541,11 +552,26 @@ class ComfoConnectBridge(ComfoConnect):
         Without this, changing the speed during a boost has no visible effect
         until the boost ends.
         """
-        await self._disable_timer(SUBUNIT_01, TIMER_PRESET_BOOST)
-        await self._disable_timer(SUBUNIT_01, TIMER_PRESET_BOOST_RF)
-        await self._disable_timer(SUBUNIT_HOOD, TIMER_HOOD)
-        await self._disable_timer(SUBUNIT_01, TIMER_PRESET_AWAY)
+        await asyncio.gather(
+            self._disable_timer(SUBUNIT_01, TIMER_PRESET_BOOST),
+            self._disable_timer(SUBUNIT_01, TIMER_PRESET_BOOST_RF),
+            self._disable_timer(SUBUNIT_HOOD, TIMER_HOOD),
+            self._disable_timer(SUBUNIT_01, TIMER_PRESET_AWAY),
+        )
         await super().set_speed(speed)
+
+    async def set_mode(self, mode):
+        """
+        Set the ventilation mode (auto / manual).
+
+        For auto, also cancel the speed override (the preset timer), so the
+        unit follows its schedule again. Otherwise a speed that was set while
+        in auto (or before switching to manual) stays active until its timer
+        ends. See aiocomfoconnect PR #88.
+        """
+        await super().set_mode(mode)
+        if mode == VentilationMode.AUTO:
+            await self._disable_timer(SUBUNIT_01, TIMER_PRESET)
 
     async def set_comfocool_mode(self, mode, timeout=-1):
         """
@@ -590,7 +616,7 @@ class ComfoConnectBridge(ComfoConnect):
     async def set_rmot_limit(self, property_id: int, value: float) -> None:
         """Set an RMOT limit of the season detection (in °C)."""
         await self.set_property_typed(UNIT_TEMPHUMCONTROL, SUBUNIT_01, property_id, round(value * 10), PdoType.TYPE_CN_INT16)
-        dispatcher_send(self.hass, SIGNAL_COMFOCONNECT_RMOT_LIMIT.format(self.uuid, property_id), value)
+        async_dispatcher_send(self.hass, SIGNAL_COMFOCONNECT_RMOT_LIMIT.format(self.uuid, property_id), value)
 
     async def get_filter_life_days(self) -> PropertyRange:
         """Read after how many days the filters should be replaced."""
@@ -651,7 +677,7 @@ class ComfoConnectBridge(ComfoConnect):
     @callback
     def sensor_callback(self, sensor: Sensor, value):
         """Notify listeners that we have received an update."""
-        dispatcher_send(
+        async_dispatcher_send(
             self.hass,
             SIGNAL_COMFOCONNECT_UPDATE_RECEIVED.format(self.uuid, sensor.id),
             value,

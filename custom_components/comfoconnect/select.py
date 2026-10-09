@@ -31,7 +31,7 @@ from aiocomfoconnect.sensors import (
 from aiocomfoconnect.sensors import Sensor as AioComfoConnectSensor
 from homeassistant.components.select import SelectEntity, SelectEntityDescription
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
@@ -54,23 +54,18 @@ MAX_UPDATE_FAILURES = 3
 SCAN_INTERVAL = timedelta(minutes=5)
 
 
-@dataclass
-class ComfoconnectSelectDescriptionMixin:
-    """Mixin for required keys."""
+@dataclass(frozen=True, kw_only=True)
+class ComfoconnectSelectEntityDescription(SelectEntityDescription):
+    """Describes ComfoConnect select entity."""
 
     set_value_fn: Callable[[ComfoConnectBridge, str], Awaitable[Any]]
     get_value_fn: Callable[[ComfoConnectBridge], Awaitable[Any]]
-
-
-@dataclass
-class ComfoconnectSelectEntityDescription(SelectEntityDescription, ComfoconnectSelectDescriptionMixin):
-    """Describes ComfoConnect select entity."""
 
     # Sensors (PDOs) that push the current value. sensor_value_fn receives the
     # latest value of each of them (by sensor id) once all have been received,
     # and returns the option, or None when the values don't map to an option.
     sensors: tuple[AioComfoConnectSensor, ...] = ()
-    sensor_value_fn: Callable[[dict[int, Any]], str | None] = None
+    sensor_value_fn: Callable[[dict[int, Any]], str | None] | None = None
     # Only add the entity when the unit supports it (reading it doesn't fail).
     probe: bool = False
 
@@ -236,7 +231,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the ComfoConnect selects."""
-    ccb = hass.data[DOMAIN][config_entry.entry_id]
+    ccb = config_entry.runtime_data
 
     selects = []
     for description in SELECT_TYPES:
@@ -251,7 +246,7 @@ async def async_setup_entry(
                 pass
         selects.append(ComfoConnectSelect(ccb=ccb, config_entry=config_entry, description=description))
 
-    async_add_entities(selects, True)
+    async_add_entities(selects)
 
 
 class ComfoConnectSelect(SelectEntity):
@@ -301,6 +296,10 @@ class ComfoConnectSelect(SelectEntity):
             )
             await self._ccb.register_sensor(sensor)
 
+        # Read the value in the background, so the setup doesn't wait for the bridge.
+        self.async_schedule_update_ha_state(True)
+
+    @callback
     def _handle_availability_update(self, available: bool) -> None:
         """Handle availability updates."""
         was_available = self._attr_available
@@ -309,10 +308,11 @@ class ComfoConnectSelect(SelectEntity):
             # After a reconnect the bridge can push stale initial values
             # (e.g. temperature profile reverting to "normal"); re-read the
             # authoritative value via the RMI getter to correct it.
-            self.schedule_update_ha_state(force_refresh=True)
+            self.async_schedule_update_ha_state(True)
         else:
-            self.schedule_update_ha_state()
+            self.async_write_ha_state()
 
+    @callback
     def _handle_update(self, sensor: AioComfoConnectSensor, value):
         """Handle update callbacks."""
         _LOGGER.debug("Handle update for sensor %s (%s): %s", sensor.name, sensor.id, value)
@@ -325,7 +325,7 @@ class ComfoConnectSelect(SelectEntity):
             # Unknown or transient value: keep the current option.
             return
         self._attr_current_option = option
-        self.schedule_update_ha_state()
+        self.async_write_ha_state()
 
     async def async_update(self) -> None:
         """Update the state."""
@@ -349,7 +349,6 @@ class ComfoConnectSelect(SelectEntity):
 
         # Successful poll: clear the failure streak and restore availability.
         self._fail_count = 0
-        self._sensor_values: dict[int, Any] = {}
         self._attr_available = True
         if value is not None:
             self._attr_current_option = value
@@ -363,4 +362,4 @@ class ComfoConnectSelect(SelectEntity):
         except ComfoConnectError as err:
             raise HomeAssistantError(f"Failed to set {self.entity_description.name}: {err}") from err
         self._attr_current_option = option
-        self.schedule_update_ha_state()
+        self.async_write_ha_state()

@@ -32,17 +32,11 @@ from .pdo import (
 _LOGGER = logging.getLogger(__name__)
 
 
-@dataclass
-class ComfoconnectRequiredKeysMixin:
-    """Mixin for required keys."""
-
-    press_fn: Callable[[ComfoConnectBridge, str], Awaitable[Any]]
-
-
-@dataclass
-class ComfoconnectButtonEntityDescription(ButtonEntityDescription, ComfoconnectRequiredKeysMixin):
+@dataclass(frozen=True, kw_only=True)
+class ComfoconnectButtonEntityDescription(ButtonEntityDescription):
     """Describes ComfoConnect button entity."""
 
+    press_fn: Callable[[ComfoConnectBridge], Awaitable[Any]]
     # The button needs the current RMOT.
     needs_rmot: bool = False
 
@@ -50,13 +44,13 @@ class ComfoconnectButtonEntityDescription(ButtonEntityDescription, ComfoconnectR
 BUTTON_TYPES = (
     ComfoconnectButtonEntityDescription(
         key="reset_errors",
-        press_fn=lambda ccb, option: cast(Coroutine, ccb.clear_errors()),
+        press_fn=lambda ccb: cast(Coroutine, ccb.clear_errors()),
         name="Reset errors",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     ComfoconnectButtonEntityDescription(
         key="start_heating_season",
-        press_fn=lambda ccb, option: cast(Coroutine, ccb.start_season_now(PROPERTY_RMOT_LIMIT_HEATING)),
+        press_fn=lambda ccb: cast(Coroutine, ccb.start_season_now(PROPERTY_RMOT_LIMIT_HEATING)),
         name="Start heating season now",
         icon="mdi:radiator",
         entity_category=EntityCategory.CONFIG,
@@ -64,7 +58,7 @@ BUTTON_TYPES = (
     ),
     ComfoconnectButtonEntityDescription(
         key="start_cooling_season",
-        press_fn=lambda ccb, option: cast(Coroutine, ccb.start_season_now(PROPERTY_RMOT_LIMIT_COOLING)),
+        press_fn=lambda ccb: cast(Coroutine, ccb.start_season_now(PROPERTY_RMOT_LIMIT_COOLING)),
         name="Start cooling season now",
         icon="mdi:snowflake",
         entity_category=EntityCategory.CONFIG,
@@ -74,21 +68,21 @@ BUTTON_TYPES = (
     # it (which resets the filter counter) or cancel it.
     ComfoconnectButtonEntityDescription(
         key="filter_replacement_start",
-        press_fn=lambda ccb, option: cast(Coroutine, ccb.filter_replacement(FILTER_BEGIN_REPLACEMENT)),
+        press_fn=lambda ccb: cast(Coroutine, ccb.filter_replacement(FILTER_BEGIN_REPLACEMENT)),
         name="Start filter replacement",
         icon="mdi:air-filter",
         entity_category=EntityCategory.CONFIG,
     ),
     ComfoconnectButtonEntityDescription(
         key="filter_replacement_finish",
-        press_fn=lambda ccb, option: cast(Coroutine, ccb.filter_replacement(FILTER_END_REPLACEMENT)),
+        press_fn=lambda ccb: cast(Coroutine, ccb.filter_replacement(FILTER_END_REPLACEMENT)),
         name="Finish filter replacement",
         icon="mdi:check",
         entity_category=EntityCategory.CONFIG,
     ),
     ComfoconnectButtonEntityDescription(
         key="filter_replacement_cancel",
-        press_fn=lambda ccb, option: cast(Coroutine, ccb.filter_replacement(FILTER_ABORT_REPLACEMENT)),
+        press_fn=lambda ccb: cast(Coroutine, ccb.filter_replacement(FILTER_ABORT_REPLACEMENT)),
         name="Cancel filter replacement",
         icon="mdi:close",
         entity_category=EntityCategory.CONFIG,
@@ -101,12 +95,10 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the ComfoConnect binary sensors."""
-    ccb = hass.data[DOMAIN][config_entry.entry_id]
+    """Set up the ComfoConnect buttons."""
+    ccb = config_entry.runtime_data
 
-    sensors = [ComfoConnectButton(ccb=ccb, config_entry=config_entry, description=description) for description in BUTTON_TYPES]
-
-    async_add_entities(sensors, True)
+    async_add_entities(ComfoConnectButton(ccb=ccb, config_entry=config_entry, description=description) for description in BUTTON_TYPES)
 
 
 class ComfoConnectButton(ButtonEntity):
@@ -121,7 +113,7 @@ class ComfoConnectButton(ButtonEntity):
         config_entry: ConfigEntry,
         description: ComfoconnectButtonEntityDescription,
     ) -> None:
-        """Initialize the ComfoConnect sensor."""
+        """Initialize the ComfoConnect button."""
         self._ccb = ccb
         self.entity_description = description
         self._attr_unique_id = f"{self._ccb.uuid}-{description.key}"
@@ -137,7 +129,7 @@ class ComfoConnectButton(ButtonEntity):
     async def async_press(self) -> None:
         """Press the button."""
         try:
-            await self.entity_description.press_fn(self._ccb, self._attr_unique_id)
+            await self.entity_description.press_fn(self._ccb)
         except (AioComfoConnectNotConnected, AioComfoConnectTimeout) as err:
             raise HomeAssistantError(f"Not connected to ComfoConnect bridge: {err}") from err
         except ComfoConnectError as err:

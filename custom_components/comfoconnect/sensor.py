@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Callable
@@ -74,11 +75,11 @@ from homeassistant.const import (
     UnitOfTime,
     UnitOfVolumeFlowRate,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.util import Throttle
+from homeassistant.helpers.event import async_call_later
 
 from . import DOMAIN, SIGNAL_COMFOCONNECT_AVAILABLE, SIGNAL_COMFOCONNECT_UPDATE_RECEIVED, ComfoConnectBridge
 from .pdo import (
@@ -105,21 +106,16 @@ _LOGGER = logging.getLogger(__name__)
 MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=10)
 
 
-@dataclass
-class ComfoconnectRequiredKeysMixin:
-    """Mixin for required keys."""
-
-    ccb_sensor: AioComfoConnectSensor
-
-
-@dataclass
-class ComfoconnectSensorEntityDescription(SensorEntityDescription, ComfoconnectRequiredKeysMixin):
+@dataclass(frozen=True, kw_only=True)
+class ComfoconnectSensorEntityDescription(SensorEntityDescription):
     """Describes ComfoConnect sensor entity."""
 
+    ccb_sensor: AioComfoConnectSensor
     throttle: bool = False
-    mapping: Callable = None
+    mapping: Callable | None = None
     # Ignore a pushed value of 0 (the bridge emits a spurious 0 for many
-    # sensors right after a reconnect). Auto-enabled for temperature/humidity.
+    # sensors right after a reconnect). Auto-enabled for humidity; for
+    # temperatures only where 0 °C isn't plausible (not outdoors, say).
     ignore_zero: bool = False
     # The value is an airflow in the unit configured on the unit (PDO 224).
     flow_unit: bool = False
@@ -133,6 +129,7 @@ SENSOR_TYPES = (
         name="Inside temperature",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         ccb_sensor=SENSORS.get(SENSOR_TEMPERATURE_EXTRACT),
+        ignore_zero=True,
     ),
     ComfoconnectSensorEntityDescription(
         key=SENSOR_HUMIDITY_EXTRACT,
@@ -461,6 +458,8 @@ SENSOR_TYPES = (
         entity_category=EntityCategory.DIAGNOSTIC,
         # -1 means the timer runs indefinitely.
         mapping=lambda x: None if x < 0 else x,
+        # The bridge counts down every second; don't record every second.
+        throttle=True,
     ),
     ComfoconnectSensorEntityDescription(
         key=SENSOR_COMFORTCONTROL_MODE,
@@ -480,6 +479,7 @@ SENSOR_TYPES = (
         name="Target temperature",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         ccb_sensor=SENSORS.get(SENSOR_TARGET_TEMPERATURE),
+        ignore_zero=True,
     ),
     ComfoconnectSensorEntityDescription(
         key=SENSOR_VALVE_BYPASS_POSITION,
@@ -616,11 +616,11 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the ComfoConnect sensors."""
-    ccb = hass.data[DOMAIN][config_entry.entry_id]
+    ccb = config_entry.runtime_data
 
     sensors = [ComfoConnectSensor(ccb=ccb, config_entry=config_entry, description=description) for description in SENSOR_TYPES]
 
-    async_add_entities(sensors, True)
+    async_add_entities(sensors)
 
 
 class ComfoConnectSensor(RestoreSensor):
@@ -639,6 +639,9 @@ class ComfoConnectSensor(RestoreSensor):
         """Initialize the ComfoConnect sensor."""
         self._ccb = ccb
         self.entity_description = description
+        # Throttled sensors: when the state was last written, and the pending write.
+        self._last_write = 0.0
+        self._unsub_throttle: CALLBACK_TYPE | None = None
         self._attr_unique_id = f"{self._ccb.uuid}-{description.key}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._ccb.uuid)},
@@ -665,19 +668,14 @@ class ComfoConnectSensor(RestoreSensor):
             )
         )
 
-        # If the sensor should be throttled, pass it through the Throttle utility
-        if self.entity_description.throttle:
-            update_handler = Throttle(MIN_TIME_BETWEEN_UPDATES)(self._handle_update)
-        else:
-            update_handler = self._handle_update
-
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
                 SIGNAL_COMFOCONNECT_UPDATE_RECEIVED.format(self._ccb.uuid, self.entity_description.key),
-                update_handler,
+                self._handle_update,
             )
         )
+        self.async_on_remove(self._cancel_throttle)
         await self._ccb.register_sensor(self.entity_description.ccb_sensor)
 
         if self.entity_description.flow_unit:
@@ -690,18 +688,21 @@ class ComfoConnectSensor(RestoreSensor):
             )
             await self._ccb.register_sensor(EXTRA_SENSORS[SENSOR_FLOW_UNIT])
 
+    @callback
     def _handle_flow_unit_update(self, value: int) -> None:
         """Use the airflow unit that is configured on the unit."""
         if (unit := FLOW_UNITS.get(value)) is None or unit == self.native_unit_of_measurement:
             return
         self._attr_native_unit_of_measurement = unit
-        self.schedule_update_ha_state()
+        self.async_write_ha_state()
 
+    @callback
     def _handle_availability_update(self, available: bool) -> None:
         """Handle availability updates."""
         self._attr_available = available
-        self.schedule_update_ha_state()
+        self.async_write_ha_state()
 
+    @callback
     def _handle_update(self, value):
         """Handle update callbacks."""
         _LOGGER.debug(
@@ -714,10 +715,7 @@ class ComfoConnectSensor(RestoreSensor):
         # The bridge pushes a spurious 0 for many sensors right after a
         # reconnect. Drop it (keeping the last value) for sensors where 0 is
         # implausible, so the value isn't corrupted until the next real push.
-        ignore_zero = self.entity_description.ignore_zero or self.device_class in (
-            SensorDeviceClass.TEMPERATURE,
-            SensorDeviceClass.HUMIDITY,
-        )
+        ignore_zero = self.entity_description.ignore_zero or self.device_class == SensorDeviceClass.HUMIDITY
         if ignore_zero and value == 0:
             _LOGGER.debug("Ignoring spurious 0 for %s", self.entity_description.name)
             return
@@ -726,4 +724,33 @@ class ComfoConnectSensor(RestoreSensor):
             self._attr_native_value = self.entity_description.mapping(value)
         else:
             self._attr_native_value = value
-        self.schedule_update_ha_state()
+
+        if not self.entity_description.throttle:
+            self.async_write_ha_state()
+            return
+
+        # Write at most once per MIN_TIME_BETWEEN_UPDATES, but always write the
+        # latest value in the end: the bridge only sends a value when it
+        # changes, so a dropped value could be shown until the next change.
+        if self._unsub_throttle is not None:
+            # A write is already scheduled, it will write this value.
+            return
+        delay = self._last_write + MIN_TIME_BETWEEN_UPDATES.total_seconds() - time.monotonic()
+        if delay > 0:
+            self._unsub_throttle = async_call_later(self.hass, delay, self._write_throttled)
+            return
+        self._write_throttled()
+
+    @callback
+    def _write_throttled(self, _now=None) -> None:
+        """Write the state of a throttled sensor."""
+        self._unsub_throttle = None
+        self._last_write = time.monotonic()
+        self.async_write_ha_state()
+
+    @callback
+    def _cancel_throttle(self) -> None:
+        """Cancel a scheduled write."""
+        if self._unsub_throttle is not None:
+            self._unsub_throttle()
+            self._unsub_throttle = None

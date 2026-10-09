@@ -21,7 +21,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntityDescription,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -34,16 +34,11 @@ from .pdo import SENSORS as EXTRA_SENSORS
 _LOGGER = logging.getLogger(__name__)
 
 
-@dataclass
-class ComfoconnectRequiredKeysMixin:
-    """Mixin for required keys."""
+@dataclass(frozen=True, kw_only=True)
+class ComfoconnectBinarySensorEntityDescription(BinarySensorEntityDescription):
+    """Describes ComfoConnect binary sensor entity."""
 
     ccb_sensor: AioComfoConnectSensor
-
-
-@dataclass
-class ComfoconnectBinarySensorEntityDescription(BinarySensorEntityDescription, ComfoconnectRequiredKeysMixin):
-    """Describes ComfoConnect binary sensor entity."""
 
 
 SENSOR_TYPES = (
@@ -91,11 +86,11 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the ComfoConnect binary sensors."""
-    ccb = hass.data[DOMAIN][config_entry.entry_id]
+    ccb = config_entry.runtime_data
 
     sensors = [ComfoConnectBinarySensor(ccb=ccb, config_entry=config_entry, description=description) for description in SENSOR_TYPES]
 
-    async_add_entities(sensors, True)
+    async_add_entities(sensors)
 
 
 class ComfoConnectBinarySensor(BinarySensorEntity, RestoreEntity):
@@ -148,11 +143,13 @@ class ComfoConnectBinarySensor(BinarySensorEntity, RestoreEntity):
         )
         await self._ccb.register_sensor(self.entity_description.ccb_sensor)
 
+    @callback
     def _handle_availability_update(self, available: bool) -> None:
         """Handle availability updates."""
         self._attr_available = available
-        self.schedule_update_ha_state()
+        self.async_write_ha_state()
 
+    @callback
     def _handle_update(self, value):
         """Handle update callbacks."""
         _LOGGER.debug(
@@ -163,4 +160,4 @@ class ComfoConnectBinarySensor(BinarySensorEntity, RestoreEntity):
         )
 
         self._attr_is_on = True if value else False
-        self.schedule_update_ha_state()
+        self.async_write_ha_state()

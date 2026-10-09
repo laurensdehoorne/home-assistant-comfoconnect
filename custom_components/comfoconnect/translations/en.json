@@ -3,7 +3,8 @@
         "abort": {
             "no_devices_found": "No devices found on the network",
             "reauth_successful": "Re-authentication was successful",
-            "reconfigure_successful": "Re-configuration was successful"
+            "reconfigure_successful": "Re-configuration was successful",
+            "cannot_connect": "Failed to connect"
         },
         "create_entry": {
             "default": "Some sensors are not enabled by default. You can enable them in the entity registry after the integration configuration."

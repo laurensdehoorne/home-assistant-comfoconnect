@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any
 
@@ -10,6 +11,7 @@ import voluptuous as vol
 from aiocomfoconnect import Bridge
 from aiocomfoconnect.exceptions import (
     AioComfoConnectNotConnected,
+    AioComfoConnectNotReachable,
     AioComfoConnectTimeout,
     ComfoConnectError,
     ComfoConnectNotAllowed,
@@ -176,13 +178,17 @@ class ComfoConnectConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors = {"base": "invalid_pin"} if pin is not None else {}
             return await self.async_step_enter_pin({}, errors)
 
-        finally:
-            # Disconnect
-            await self.bridge.disconnect()
+        except (AioComfoConnectNotConnected, AioComfoConnectNotReachable, AioComfoConnectTimeout, ComfoConnectError, OSError) as err:
+            _LOGGER.warning("Could not register on the bridge at %s: %r", self.bridge.host, err)
+            return self.async_abort(reason="cannot_connect")
 
-        if self.context.get("source") == config_entries.SOURCE_REAUTH:
-            self.hass.async_create_task(self.hass.config_entries.async_reload(self.context["entry_id"]))
-            return self.async_abort(reason="reauth_successful")
+        finally:
+            # Disconnect (the connection may already be gone).
+            with contextlib.suppress(Exception):
+                await self.bridge.disconnect()
+
+        if self.source == config_entries.SOURCE_REAUTH:
+            return self.async_update_reload_and_abort(self._get_reauth_entry())
 
         return self.async_create_entry(
             title=self.bridge.host,
@@ -259,7 +265,7 @@ async def _validate_installer_pin(hass, entry: config_entries.ConfigEntry, pin: 
     if not pin.isdigit() or len(pin) > 4:
         return None, {CONF_INSTALLER_PIN: "invalid_installer_pin"}
 
-    bridge = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    bridge = getattr(entry, "runtime_data", None)
     if bridge is None:
         return None, {"base": "cannot_connect"}
     try:

@@ -16,7 +16,7 @@ from aiocomfoconnect.exceptions import (
 from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberEntityDescription, NumberMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature, UnitOfTime
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
@@ -125,11 +125,10 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the ComfoConnect numbers."""
-    ccb = hass.data[DOMAIN][config_entry.entry_id]
+    ccb = config_entry.runtime_data
 
     async_add_entities(
         [ComfoConnectNumber(ccb=ccb, description=description) for description in NUMBER_TYPES if ccb.installer_mode or not description.installer],
-        True,
     )
 
 
@@ -177,22 +176,28 @@ class ComfoConnectNumber(NumberEntity):
             )
             await self._ccb.register_sensor(EXTRA_SENSORS[SENSOR_FLOW_UNIT])
 
+        # Read the value in the background, so the setup doesn't wait for the bridge.
+        self.async_schedule_update_ha_state(True)
+
+    @callback
     def _handle_availability_update(self, available: bool) -> None:
         """Handle availability updates."""
         self._attr_available = available
-        self.schedule_update_ha_state()
+        self.async_write_ha_state()
 
+    @callback
     def _handle_value_update(self, value: float) -> None:
         """Handle a new value that was written to the unit."""
         self._attr_native_value = value
-        self.schedule_update_ha_state()
+        self.async_write_ha_state()
 
+    @callback
     def _handle_flow_unit_update(self, value: int) -> None:
         """Use the airflow unit that is configured on the unit."""
         if (unit := FLOW_UNITS.get(value)) is None or unit == self.native_unit_of_measurement:
             return
         self._attr_native_unit_of_measurement = unit
-        self.schedule_update_ha_state()
+        self.async_write_ha_state()
 
     async def async_update(self) -> None:
         """Read the value (and its allowed range) from the unit."""
